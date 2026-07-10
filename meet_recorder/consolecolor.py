@@ -1,5 +1,7 @@
 '''Utility to show text with colors in console'''
 
+import sys
+
 
 GREY = '\x1b[38;21m'
 BLUE = '\x1b[38;5;39m'
@@ -12,7 +14,7 @@ BOLD = '\033[1m'
 RESET = '\x1b[0m'
 ENDC = '\033[0m'
 
-enabled = True
+enabled = sys.stdout.isatty()
 
 
 def grey(text):
