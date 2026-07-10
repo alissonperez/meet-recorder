@@ -124,7 +124,7 @@ def _transcribe_audio(mp3_path, config):
     return '\n'.join(texts)
 
 
-def _chat_completion(model, system_prompt, transcript_text, config):
+def _chat_completion(model, system_prompt, user_content, config):
     client = OpenAI(base_url=config.base_url, api_key=_api_key())
 
     try:
@@ -132,7 +132,7 @@ def _chat_completion(model, system_prompt, transcript_text, config):
             model=model,
             messages=[
                 {'role': 'system', 'content': system_prompt},
-                {'role': 'user', 'content': transcript_text},
+                {'role': 'user', 'content': user_content},
             ],
         )
     except Exception as e:
@@ -141,7 +141,7 @@ def _chat_completion(model, system_prompt, transcript_text, config):
     return response.choices[0].message.content.strip()
 
 
-def _generate_title(transcript_text, config):
+def _generate_title(summary_text, config):
     prompt = config.title_prompt
     title = ''
 
@@ -149,7 +149,7 @@ def _generate_title(transcript_text, config):
         if attempt > 0:
             prompt = f'{config.title_prompt}\n\nO título anterior excedeu {TITLE_MAX_LENGTH} caracteres. Gere um título mais curto.'
 
-        title = _chat_completion(config.title_model, prompt, transcript_text, config)
+        title = _chat_completion(config.title_model, prompt, summary_text, config)
 
         if len(title) <= TITLE_MAX_LENGTH:
             return title
@@ -209,8 +209,8 @@ async def transcribe(wav_path, config=None):
         tmp_dir = os.path.dirname(mp3_path)
 
         transcript_text = _transcribe_audio(mp3_path, config)
-        title = _generate_title(transcript_text, config)
         summary_text = _generate_summary(transcript_text, config)
+        title = _generate_title(summary_text, config)
 
         base_filename = _build_base_filename(timestamp, title)
 
