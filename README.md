@@ -86,3 +86,69 @@ It uses the same capture logic as `python main.py record` (requires the
 
 The app runs attached to the terminal it was launched from (no `.app` bundle / Finder launch yet)
 and must be started manually each time — it does not launch at login.
+
+## Autostart at login (launchd)
+
+The menu bar app can be started automatically when you log into macOS, using a `launchd`
+LaunchAgent:
+
+- [`run.sh`](./run.sh) — wrapper script that `cd`s into the project directory (so `.env` is
+  found) and invokes the poetry venv's Python directly with `main.py menubar`.
+- [`com.alisson.meet-recorder.plist`](./com.alisson.meet-recorder.plist) — the LaunchAgent
+  definition: `RunAtLoad` (start at login) + `KeepAlive` (relaunch if the process exits), with
+  stdout/stderr redirected to log files.
+
+Both files live at the repo root.
+
+### Finding/updating the poetry venv Python path
+
+`run.sh` hardcodes the venv's Python path in `VENV_PYTHON`, since launchd's minimal environment
+doesn't reliably have `poetry` on `PATH`. Find the current path with:
+
+```
+$ poetry env info --path
+```
+
+Append `/bin/python` to that path. If the venv is ever deleted and recreated (e.g. after
+`make clear` + `make setup`), its hashed path changes — re-run the command above and update
+`VENV_PYTHON` in `run.sh` accordingly.
+
+### Install
+
+```
+$ ln -sf "$(pwd)/com.alisson.meet-recorder.plist" ~/Library/LaunchAgents/com.alisson.meet-recorder.plist
+$ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.alisson.meet-recorder.plist
+```
+
+The menu bar icon should appear shortly after loading, without running any command manually.
+
+### Checking logs
+
+```
+$ tail -f /tmp/com.alisson.meet-recorder.out
+$ tail -f /tmp/com.alisson.meet-recorder.err
+```
+
+If the icon doesn't appear after loading, check `.err` first — a bad `VENV_PYTHON` path or
+missing `.env` will show up there. `KeepAlive` will keep relaunching the process even if it's
+crashing immediately, so a tight restart loop in the logs is a sign something's misconfigured.
+
+Note: `icecream`'s `ic()` debug calls still emit ANSI color codes regardless of whether stdout is
+a terminal (this is separate from this project's own logger, which is fully plain when
+non-interactive) — you may see a few colored escape sequences mixed into otherwise plain log
+files.
+
+### Uninstall
+
+```
+$ launchctl bootout gui/$(id -u)/com.alisson.meet-recorder
+$ rm ~/Library/LaunchAgents/com.alisson.meet-recorder.plist
+```
+
+### Notes
+
+- Only the app/menu bar icon starts automatically — no recording starts on its own; you still
+  click **Iniciar**.
+- On this machine, starting the app via launchd did not trigger a new microphone/screen-recording
+  permission prompt beyond what was already granted to the terminal-launched process. If you see
+  a new prompt on a different machine, grant it once and it should persist across restarts.
