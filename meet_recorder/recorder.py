@@ -307,6 +307,17 @@ def _merge_to_stereo(mic_path, sys_path, output_path):
                     break
 
 
+def merge_and_cleanup(mic_path, sys_path, temp_dir):
+    path = _build_output_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    _merge_to_stereo(mic_path, sys_path, path)
+
+    if temp_dir:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+    return path
+
+
 def stop_recording_and_save():
     if _state['mic_stream'] is None:
         raise RuntimeError('No recording is in progress')
@@ -322,14 +333,7 @@ def stop_recording_and_save():
         _stop_writer(_state['mic_queue'], _state['mic_writer_thread'])
         _stop_writer(_state['sys_queue'], _state['sys_writer_thread'])
 
-        path = _build_output_path()
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        _merge_to_stereo(_state['mic_temp_path'], _state['sys_temp_path'], path)
-
-        if _state['temp_dir']:
-            shutil.rmtree(_state['temp_dir'], ignore_errors=True)
-
-        return path
+        return merge_and_cleanup(_state['mic_temp_path'], _state['sys_temp_path'], _state['temp_dir'])
     finally:
         _restore_output_device(_state['previous_output_device'])
 
@@ -350,3 +354,45 @@ def stop_recording_and_save():
 def _build_output_path():
     timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
     return os.path.join(_recordings_dir(), f'{timestamp}.wav')
+
+
+def list_orphan_candidates():
+    in_progress_dir = os.path.join(_recordings_dir(), IN_PROGRESS_DIR_NAME)
+    if not os.path.isdir(in_progress_dir):
+        return []
+
+    return sorted(
+        os.path.join(in_progress_dir, name)
+        for name in os.listdir(in_progress_dir)
+        if os.path.isdir(os.path.join(in_progress_dir, name))
+    )
+
+
+def _is_valid_orphan(orphan_dir):
+    mic_path = os.path.join(orphan_dir, 'mic.wav')
+    sys_path = os.path.join(orphan_dir, 'sys.wav')
+
+    for path in (mic_path, sys_path):
+        try:
+            with sf.SoundFile(path, mode='r') as f:
+                if len(f) == 0:
+                    return False
+        except (RuntimeError, OSError):
+            return False
+
+    return True
+
+
+def discard_invalid_orphans(candidates):
+    valid_orphans = []
+    for candidate in candidates:
+        if _is_valid_orphan(candidate):
+            valid_orphans.append(candidate)
+        else:
+            shutil.rmtree(candidate, ignore_errors=True)
+
+    return valid_orphans
+
+
+def delete_orphan(orphan_dir):
+    shutil.rmtree(orphan_dir, ignore_errors=True)
