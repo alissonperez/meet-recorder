@@ -171,11 +171,16 @@ def _resolve_timestamp(wav_path):
         return datetime.fromtimestamp(os.path.getmtime(wav_path))
 
 
-def _build_base_filename(timestamp, title):
-    ts_str = timestamp.strftime(FILENAME_TIMESTAMP_FORMAT)
-    title_slug = slugify(title, lowercase=False)[:80]
+def _format_display_timestamp(timestamp):
+    return timestamp.astimezone().replace(microsecond=0).isoformat().replace(':', '-')
 
-    return f'{ts_str} - {title_slug}'
+
+def _build_base_filename(timestamp, title, suffix=None):
+    ts_str = _format_display_timestamp(timestamp)
+    title_slug = slugify(title, lowercase=False)[:80]
+    suffix_str = f' {suffix}' if suffix else ''
+
+    return f'{ts_str}{suffix_str} - {title_slug}'
 
 
 def _write_markdown(base_dir, timestamp, base_filename, content):
@@ -212,13 +217,13 @@ async def transcribe(wav_path, config=None):
         summary_text = _generate_summary(transcript_text, config)
         title = _generate_title(summary_text, config)
 
-        base_filename = _build_base_filename(timestamp, title)
-
         transcript_path = _write_markdown(
-            config.transcript_dir, timestamp, base_filename, _transcript_markdown(title, transcript_text),
+            config.transcript_dir, timestamp, _build_base_filename(timestamp, title),
+            _transcript_markdown(title, transcript_text),
         )
         summary_path = _write_markdown(
-            config.summary_dir, timestamp, base_filename, _summary_markdown(title, summary_text),
+            config.summary_dir, timestamp, _build_base_filename(timestamp, title, suffix='RESUMO'),
+            _summary_markdown(title, summary_text),
         )
 
         return {'transcript_path': transcript_path, 'summary_path': summary_path}
