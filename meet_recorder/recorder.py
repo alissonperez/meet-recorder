@@ -20,6 +20,14 @@ DEFAULT_MULTI_OUTPUT_DEVICE_NAME = 'Multi-Output (BlackHole)'
 DEFAULT_SILENCE_RMS_THRESHOLD = 0.001
 DEFAULT_SILENCE_WINDOW_SECONDS = 30.0
 
+def _default_on_silence_warning():
+    pass
+
+
+# Optional hook invoked alongside the log warning when sustained silence is detected.
+# Defaults to a no-op so the CLI-only path is unchanged; set by menubar.py when running under it.
+on_silence_warning = _default_on_silence_warning
+
 _state = {
     'mic_stream': None,
     'sys_stream': None,
@@ -127,6 +135,7 @@ def _silence_monitor_loop(stop_event):
                     f'System audio channel (BlackHole) has been silent for over {window_seconds:.0f}s - '
                     'check that system output is routed to the Multi-Output Device'
                 )
+                on_silence_warning()
                 warned = True
         else:
             silent_since = None

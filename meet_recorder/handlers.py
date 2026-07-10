@@ -3,7 +3,7 @@ import time
 
 from icecream import ic
 
-from meet_recorder import consolecolor as ccolor, data, recorder
+from meet_recorder import consolecolor as ccolor, data, menubar, recorder
 from meet_recorder.tools import handler
 
 
@@ -46,3 +46,12 @@ def handler_record(duration=30):
     finally:
         path = recorder.stop_recording_and_save()
         logger.info(f'Recording saved to {ccolor.green(path)}')
+
+
+@handler
+def handler_menubar():
+    '''Launch the macOS menu bar app for starting/stopping recordings'''
+
+    ic('starting menubar app')
+
+    menubar.MenubarApp().run()

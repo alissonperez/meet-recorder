@@ -13,6 +13,7 @@ requests = "^2.32.3"
 sounddevice = "^0.5.5"
 numpy = "^2.5.1"
 soundfile = "^0.14.0"
+rumps = "^0.4.0"
 
 
 [tool.poetry.group.dev.dependencies]
