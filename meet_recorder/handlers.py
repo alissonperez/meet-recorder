@@ -1,4 +1,5 @@
 import logging
+import os
 import time
 
 from icecream import ic
@@ -67,3 +68,38 @@ async def handler_transcribe(path):
 
     logger.info(f'Transcript saved to {ccolor.green(result["transcript_path"])}')
     logger.info(f'Summary saved to {ccolor.green(result["summary_path"])}')
+
+
+@handler
+async def handler_recover():
+    '''Scan for orphaned in-progress recordings left behind by a crash, then process/ignore/delete them'''
+
+    ic('scanning for orphaned recordings')
+
+    candidates = recorder.list_orphan_candidates()
+    valid_orphans = recorder.discard_invalid_orphans(candidates)
+
+    if not valid_orphans:
+        logger.info('Nothing to recover')
+        return
+
+    count = len(valid_orphans)
+    noun = 'gravação pendente' if count == 1 else 'gravações pendentes'
+    choice = input(f'{count} {noun} encontrada(s). Processar (p), Ignorar (i) ou Apagar (a)? [p/i/a]: ').strip().lower()
+
+    if choice == 'p':
+        for orphan_dir in valid_orphans:
+            mic_path = os.path.join(orphan_dir, 'mic.wav')
+            sys_path = os.path.join(orphan_dir, 'sys.wav')
+            path = recorder.merge_and_cleanup(mic_path, sys_path, orphan_dir)
+            logger.info(f'Recovered recording saved to {ccolor.green(path)}')
+
+            result = await transcriber.transcribe(path)
+            logger.info(f'Transcript saved to {ccolor.green(result["transcript_path"])}')
+            logger.info(f'Summary saved to {ccolor.green(result["summary_path"])}')
+    elif choice == 'a':
+        for orphan_dir in valid_orphans:
+            recorder.delete_orphan(orphan_dir)
+        logger.info('Pending recordings deleted')
+    else:
+        logger.info('Pending recordings left untouched')
