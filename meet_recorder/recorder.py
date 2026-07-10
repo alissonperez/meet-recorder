@@ -1,5 +1,7 @@
 import logging
 import os
+import queue
+import shutil
 import subprocess
 import threading
 import time
@@ -20,6 +22,14 @@ DEFAULT_MULTI_OUTPUT_DEVICE_NAME = 'Multi-Output (BlackHole)'
 DEFAULT_SILENCE_RMS_THRESHOLD = 0.001
 DEFAULT_SILENCE_WINDOW_SECONDS = 30.0
 
+IN_PROGRESS_DIR_NAME = '.in-progress'
+# sounddevice delivers frequent small callbacks (blocksize chosen by PortAudio, typically
+# well under 50ms); sizing the queue in chunk count rather than seconds, this comfortably
+# covers several seconds of buffered audio before a writer thread stall would drop frames.
+WRITER_QUEUE_MAXSIZE = 500
+MERGE_BLOCK_FRAMES = 44100
+
+
 def _default_on_silence_warning():
     pass
 
@@ -31,8 +41,15 @@ on_silence_warning = _default_on_silence_warning
 _state = {
     'mic_stream': None,
     'sys_stream': None,
-    'mic_frames': [],
-    'sys_frames': [],
+    'mic_queue': None,
+    'sys_queue': None,
+    'mic_writer_thread': None,
+    'sys_writer_thread': None,
+    'mic_temp_path': None,
+    'sys_temp_path': None,
+    'temp_dir': None,
+    'silence_buffer': None,
+    'silence_buffer_lock': None,
     'previous_output_device': None,
     'silence_stop_event': None,
     'silence_thread': None,
@@ -109,22 +126,71 @@ def _rms(frames):
     return float(np.sqrt(np.mean(np.square(frames))))
 
 
+def _build_temp_paths():
+    timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+    temp_dir = os.path.join(_recordings_dir(), IN_PROGRESS_DIR_NAME, timestamp)
+    return temp_dir, os.path.join(temp_dir, 'mic.wav'), os.path.join(temp_dir, 'sys.wav')
+
+
+def _writer_loop(file_queue, path):
+    with sf.SoundFile(path, mode='w', samplerate=SAMPLE_RATE, channels=1, subtype='PCM_16') as f:
+        while True:
+            chunk = file_queue.get()
+            if chunk is None:
+                break
+            f.write(chunk)
+
+
+def _start_writer(file_queue, path):
+    thread = threading.Thread(target=_writer_loop, args=(file_queue, path), daemon=True)
+    thread.start()
+    return thread
+
+
+def _stop_writer(file_queue, thread):
+    if file_queue is None or thread is None:
+        return
+    file_queue.put(None)
+    thread.join()
+
+
+def _enqueue(file_queue, source_name, chunk):
+    try:
+        file_queue.put_nowait(chunk)
+    except queue.Full:
+        logger.warning(f'{source_name} writer queue is full - dropping an audio frame')
+
+
+def _append_to_silence_buffer(chunk):
+    window_seconds = _silence_window_seconds()
+    max_samples = int(window_seconds * SAMPLE_RATE)
+
+    with _state['silence_buffer_lock']:
+        buffer = np.concatenate([_state['silence_buffer'], chunk], axis=0)
+        if len(buffer) > max_samples:
+            buffer = buffer[-max_samples:]
+        _state['silence_buffer'] = buffer
+
+
+def _read_silence_buffer():
+    with _state['silence_buffer_lock']:
+        return _state['silence_buffer'].copy()
+
+
 def _silence_monitor_loop(stop_event):
     threshold = _silence_rms_threshold()
     window_seconds = _silence_window_seconds()
 
     silent_since = None
     warned = False
-    last_index = 0
 
     while not stop_event.wait(SILENCE_CHECK_INTERVAL_SECONDS):
-        new_chunks = _state['sys_frames'][last_index:]
-        last_index = len(_state['sys_frames'])
+        buffer = _read_silence_buffer()
 
-        if not new_chunks:
+        if len(buffer) == 0:
             continue
 
-        level = _rms(np.concatenate(new_chunks, axis=0))
+        level = _rms(buffer)
         now = time.monotonic()
 
         if level <= threshold:
@@ -173,14 +239,25 @@ def start_recording():
     mic_device = _find_default_mic_device()
     sys_device = _find_blackhole_device()
 
-    _state['mic_frames'] = []
-    _state['sys_frames'] = []
+    temp_dir, mic_temp_path, sys_temp_path = _build_temp_paths()
+    os.makedirs(temp_dir, exist_ok=True)
+
+    mic_queue = queue.Queue(maxsize=WRITER_QUEUE_MAXSIZE)
+    sys_queue = queue.Queue(maxsize=WRITER_QUEUE_MAXSIZE)
+
+    _state['silence_buffer'] = np.zeros((0, 1), dtype='float32')
+    _state['silence_buffer_lock'] = threading.Lock()
 
     def mic_callback(indata, frames, time_info, status):
-        _state['mic_frames'].append(indata.copy())
+        _enqueue(mic_queue, 'mic', indata.copy())
 
     def sys_callback(indata, frames, time_info, status):
-        _state['sys_frames'].append(indata.copy())
+        chunk = indata.copy()
+        _enqueue(sys_queue, 'sys', chunk)
+        _append_to_silence_buffer(chunk)
+
+    mic_writer_thread = _start_writer(mic_queue, mic_temp_path)
+    sys_writer_thread = _start_writer(sys_queue, sys_temp_path)
 
     mic_stream = sd.InputStream(
         device=mic_device, samplerate=SAMPLE_RATE, channels=1, dtype='float32', callback=mic_callback,
@@ -196,9 +273,38 @@ def start_recording():
 
     _state['mic_stream'] = mic_stream
     _state['sys_stream'] = sys_stream
+    _state['mic_queue'] = mic_queue
+    _state['sys_queue'] = sys_queue
+    _state['mic_writer_thread'] = mic_writer_thread
+    _state['sys_writer_thread'] = sys_writer_thread
+    _state['mic_temp_path'] = mic_temp_path
+    _state['sys_temp_path'] = sys_temp_path
+    _state['temp_dir'] = temp_dir
     _state['previous_output_device'] = previous_output_device
 
     _start_silence_monitor()
+
+
+def _merge_to_stereo(mic_path, sys_path, output_path):
+    with sf.SoundFile(mic_path, mode='r') as mic_file, sf.SoundFile(sys_path, mode='r') as sys_file:
+        with sf.SoundFile(
+            output_path, mode='w', samplerate=SAMPLE_RATE, channels=2, subtype='PCM_16',
+        ) as out_file:
+            while True:
+                mic_block = mic_file.read(frames=MERGE_BLOCK_FRAMES, dtype='float32', always_2d=True)
+                sys_block = sys_file.read(frames=MERGE_BLOCK_FRAMES, dtype='float32', always_2d=True)
+
+                n = min(len(mic_block), len(sys_block))
+                if n == 0:
+                    break
+
+                stereo_block = np.zeros((n, 2), dtype='float32')
+                stereo_block[:, 0] = mic_block[:n, 0]
+                stereo_block[:, 1] = sys_block[:n, 0]
+                out_file.write(stereo_block)
+
+                if len(mic_block) < MERGE_BLOCK_FRAMES or len(sys_block) < MERGE_BLOCK_FRAMES:
+                    break
 
 
 def stop_recording_and_save():
@@ -213,17 +319,15 @@ def stop_recording_and_save():
         _state['sys_stream'].stop()
         _state['sys_stream'].close()
 
-        mic = np.concatenate(_state['mic_frames'], axis=0) if _state['mic_frames'] else np.zeros((0, 1), dtype='float32')
-        system = np.concatenate(_state['sys_frames'], axis=0) if _state['sys_frames'] else np.zeros((0, 1), dtype='float32')
-
-        n = min(len(mic), len(system))
-        stereo = np.zeros((n, 2), dtype='float32')
-        stereo[:, 0] = mic[:n, 0]
-        stereo[:, 1] = system[:n, 0]
+        _stop_writer(_state['mic_queue'], _state['mic_writer_thread'])
+        _stop_writer(_state['sys_queue'], _state['sys_writer_thread'])
 
         path = _build_output_path()
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        sf.write(path, stereo, SAMPLE_RATE, subtype='PCM_16')
+        _merge_to_stereo(_state['mic_temp_path'], _state['sys_temp_path'], path)
+
+        if _state['temp_dir']:
+            shutil.rmtree(_state['temp_dir'], ignore_errors=True)
 
         return path
     finally:
@@ -231,6 +335,15 @@ def stop_recording_and_save():
 
         _state['mic_stream'] = None
         _state['sys_stream'] = None
+        _state['mic_queue'] = None
+        _state['sys_queue'] = None
+        _state['mic_writer_thread'] = None
+        _state['sys_writer_thread'] = None
+        _state['mic_temp_path'] = None
+        _state['sys_temp_path'] = None
+        _state['temp_dir'] = None
+        _state['silence_buffer'] = None
+        _state['silence_buffer_lock'] = None
         _state['previous_output_device'] = None
 
 
