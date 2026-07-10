@@ -1,0 +1,41 @@
+# Example configuration for meet-recorder transcription.
+#
+# Copy this file to ~/.config/meet-recorder/config.yaml and adjust as needed.
+# The OpenRouter API key is NOT set here - it goes in .env as OPENROUTER_API_KEY.
+
+# Model used for speech-to-text (via the OpenAI-compatible /audio/transcriptions endpoint).
+transcription_model: openai/gpt-4o-transcribe
+
+# Model used to generate the meeting summary (via chat.completions).
+summary_model: google/gemini-2.5-flash
+
+# Model used to generate the meeting title (via chat.completions).
+title_model: google/gemini-2.5-flash
+
+# Prompt/hint passed alongside the audio to the transcription model.
+transcription_prompt: |
+  Transcreva o áudio a seguir em português. O áudio é de uma reunião.
+
+# Prompt used to generate the structured Markdown summary.
+summary_prompt: |
+  Você é um assistente que resume transcrições de reuniões em português.
+  Gere um resumo em Markdown com as seções: "Resumo executivo",
+  "Principais tópicos discutidos" e "Decisões tomadas".
+  Não atribua falas a pessoas específicas, pois não há identificação de quem fala.
+
+# Prompt used to generate a short title (at most 60 characters) for the recording.
+title_prompt: |
+  Gere um título curto (no máximo 60 caracteres) para a reunião a seguir,
+  com base na transcrição. Responda apenas com o título, sem pontuação final.
+
+# Directory where full transcript Markdown files are written (organized in YYYY-MM subfolders).
+transcript_dir: ~/MeetTranscripts
+
+# Directory where summary Markdown files are written (organized in YYYY-MM subfolders).
+summary_dir: ~/MeetSummaries
+
+# Duration (in seconds) of each chunk when audio exceeds this length. Default: 7 minutes.
+chunk_duration: 420
+
+# Base URL of the OpenAI-compatible API used for both STT and chat completions.
+base_url: https://openrouter.ai/api/v1

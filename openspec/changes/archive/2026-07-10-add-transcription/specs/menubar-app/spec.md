@@ -1,9 +1,4 @@
-# menubar-app Specification
-
-## Purpose
-TBD - created by archiving change add-menubar-icon. Update Purpose after archive.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Menu bar recording control
 The system SHALL provide a macOS menu bar icon with a submenu containing "Iniciar", "Parar", "Parar e não transcrever", and "Sair", that starts and stops recording using the existing capture module, without requiring a terminal. Starting a new recording SHALL be allowed even while a previous recording's transcription is still in progress.
@@ -47,37 +42,7 @@ The system SHALL display a distinct visual indicator on the menu bar icon reflec
 - **WHEN** no recording is in progress and no transcription is running
 - **THEN** the menu bar icon returns to its neutral (idle) appearance
 
-### Requirement: Start failure alert
-The system SHALL show a modal alert if starting a recording from the menu bar fails, describing the failure, and SHALL leave the menu bar app running afterward.
-
-#### Scenario: Device not found on start
-- **WHEN** the user clicks "Iniciar" and the underlying capture module raises an error (e.g. microphone or BlackHole device not found, or output device switch failure)
-- **THEN** a modal alert is shown describing the failure, and the menu bar app remains running with "Iniciar" still enabled
-
-### Requirement: System-audio silence notification
-The system SHALL show a native macOS notification when the system-audio channel is detected as silent for a sustained period during a recording started from the menu bar.
-
-#### Scenario: Sustained silence triggers a notification
-- **WHEN** a recording started from the menu bar is in progress and the system-audio channel remains silent for the sustained period defined by the capture module
-- **THEN** a native macOS notification is shown alongside the existing log warning, and the recording continues uninterrupted
-
-### Requirement: Auto-save on quit
-The system SHALL automatically stop and save any in-progress recording before the menu bar app exits.
-
-#### Scenario: Quitting while recording
-- **WHEN** the user clicks "Sair" while a recording is in progress
-- **THEN** the recording is stopped and saved using the existing capture module before the application quits
-
-#### Scenario: Quitting while idle
-- **WHEN** the user clicks "Sair" while no recording is in progress
-- **THEN** the application quits immediately without attempting to stop or save anything
-
-### Requirement: CLI entrypoint for the menu bar app
-The system SHALL expose a CLI command that launches the menu bar application.
-
-#### Scenario: Launching via CLI
-- **WHEN** the `menubar` CLI command is invoked
-- **THEN** the menu bar icon appears and remains running until the user quits it via the "Sair" menu item
+## ADDED Requirements
 
 ### Requirement: Quit confirmation while transcriptions are in progress
 The system SHALL show a confirmation alert before quitting if one or more transcriptions are still in progress, and SHALL only quit if the user confirms.

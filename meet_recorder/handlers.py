@@ -3,7 +3,7 @@ import time
 
 from icecream import ic
 
-from meet_recorder import consolecolor as ccolor, data, menubar, recorder
+from meet_recorder import consolecolor as ccolor, data, menubar, recorder, transcriber
 from meet_recorder.tools import handler
 
 
@@ -55,3 +55,15 @@ def handler_menubar():
     ic('starting menubar app')
 
     menubar.MenubarApp().run()
+
+
+@handler
+async def handler_transcribe(path):
+    '''Transcribe an existing WAV recording and generate a title + summary'''
+
+    ic('transcribing recording', path)
+
+    result = await transcriber.transcribe(path)
+
+    logger.info(f'Transcript saved to {ccolor.green(result["transcript_path"])}')
+    logger.info(f'Summary saved to {ccolor.green(result["summary_path"])}')

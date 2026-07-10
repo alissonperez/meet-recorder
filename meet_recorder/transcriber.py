@@ -1,0 +1,227 @@
+import base64
+import logging
+import os
+import shutil
+import subprocess
+import tempfile
+from datetime import datetime
+
+import httpx
+from openai import OpenAI
+from slugify import slugify
+
+from meet_recorder.config import load_config
+
+logger = logging.getLogger(__name__)
+
+AUDIO_SAMPLE_RATE = 16000
+AUDIO_BITRATE = '32k'
+TITLE_MAX_LENGTH = 60
+TITLE_MAX_ATTEMPTS = 3
+FILENAME_TIMESTAMP_FORMAT = '%Y-%m-%d_%H-%M-%S'
+MONTH_FORMAT = '%Y-%m'
+
+
+class TranscriptionError(Exception):
+    pass
+
+
+def _api_key():
+    api_key = os.environ.get('OPENROUTER_API_KEY')
+    if not api_key:
+        raise TranscriptionError('OPENROUTER_API_KEY is not set (add it to .env)')
+    return api_key
+
+
+def _run_ffmpeg(args):
+    try:
+        subprocess.run(['ffmpeg', *args], capture_output=True, check=True)
+    except FileNotFoundError:
+        raise TranscriptionError('ffmpeg binary not found on PATH; install ffmpeg to enable transcription')
+    except subprocess.CalledProcessError as e:
+        stderr = e.stderr.decode(errors='replace') if e.stderr else ''
+        raise TranscriptionError(f'ffmpeg failed: {stderr}')
+
+
+def _get_audio_duration(path):
+    try:
+        result = subprocess.run(
+            [
+                'ffprobe', '-v', 'error',
+                '-show_entries', 'format=duration',
+                '-of', 'default=noprint_wrappers=1:nokey=1',
+                path,
+            ],
+            capture_output=True, check=True, text=True,
+        )
+    except FileNotFoundError:
+        raise TranscriptionError('ffprobe binary not found on PATH; install ffmpeg (includes ffprobe) to enable transcription')
+    except subprocess.CalledProcessError as e:
+        raise TranscriptionError(f'ffprobe failed: {e.stderr}')
+
+    return float(result.stdout.strip())
+
+
+def _preprocess_audio(wav_path):
+    tmp_dir = tempfile.mkdtemp(prefix='meet-recorder-transcribe-')
+    mp3_path = os.path.join(tmp_dir, 'audio.mp3')
+
+    _run_ffmpeg(['-y', '-i', wav_path, '-ac', '1', '-ar', str(AUDIO_SAMPLE_RATE), '-b:a', AUDIO_BITRATE, mp3_path])
+
+    return mp3_path
+
+
+def _split_into_chunks(mp3_path, chunk_duration):
+    duration = _get_audio_duration(mp3_path)
+
+    if duration <= chunk_duration:
+        return [mp3_path]
+
+    chunk_dir = os.path.dirname(mp3_path)
+    chunks = []
+    offset = 0.0
+    index = 0
+
+    while offset < duration:
+        chunk_path = os.path.join(chunk_dir, f'chunk_{index:03d}.mp3')
+        _run_ffmpeg(['-y', '-ss', str(offset), '-t', str(chunk_duration), '-i', mp3_path, '-c', 'copy', chunk_path])
+        chunks.append(chunk_path)
+        offset += chunk_duration
+        index += 1
+
+    return chunks
+
+
+def _transcribe_chunk(chunk_path, config):
+    with open(chunk_path, 'rb') as f:
+        audio_b64 = base64.b64encode(f.read()).decode('ascii')
+
+    payload = {
+        'model': config.transcription_model,
+        'input_audio': {'data': audio_b64, 'format': 'mp3'},
+        'language': 'pt',
+    }
+
+    if config.transcription_prompt:
+        payload['prompt'] = config.transcription_prompt
+
+    url = f'{config.base_url.rstrip("/")}/audio/transcriptions'
+    headers = {'Authorization': f'Bearer {_api_key()}', 'Content-Type': 'application/json'}
+
+    try:
+        response = httpx.post(url, json=payload, headers=headers, timeout=120)
+        response.raise_for_status()
+    except httpx.HTTPError as e:
+        raise TranscriptionError(f'Transcription request failed: {e}')
+
+    return response.json().get('text', '')
+
+
+def _transcribe_audio(mp3_path, config):
+    chunks = _split_into_chunks(mp3_path, config.chunk_duration)
+    texts = [_transcribe_chunk(chunk, config) for chunk in chunks]
+
+    return '\n'.join(texts)
+
+
+def _chat_completion(model, system_prompt, transcript_text, config):
+    client = OpenAI(base_url=config.base_url, api_key=_api_key())
+
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {'role': 'system', 'content': system_prompt},
+                {'role': 'user', 'content': transcript_text},
+            ],
+        )
+    except Exception as e:
+        raise TranscriptionError(f'Chat completion request failed: {e}')
+
+    return response.choices[0].message.content.strip()
+
+
+def _generate_title(transcript_text, config):
+    prompt = config.title_prompt
+    title = ''
+
+    for attempt in range(TITLE_MAX_ATTEMPTS):
+        if attempt > 0:
+            prompt = f'{config.title_prompt}\n\nO título anterior excedeu {TITLE_MAX_LENGTH} caracteres. Gere um título mais curto.'
+
+        title = _chat_completion(config.title_model, prompt, transcript_text, config)
+
+        if len(title) <= TITLE_MAX_LENGTH:
+            return title
+
+    logger.warning(f'Title exceeded {TITLE_MAX_LENGTH} chars after {TITLE_MAX_ATTEMPTS} attempts, truncating')
+    return title[:TITLE_MAX_LENGTH]
+
+
+def _generate_summary(transcript_text, config):
+    return _chat_completion(config.summary_model, config.summary_prompt, transcript_text, config)
+
+
+def _resolve_timestamp(wav_path):
+    stem = os.path.splitext(os.path.basename(wav_path))[0]
+
+    try:
+        return datetime.strptime(stem, FILENAME_TIMESTAMP_FORMAT)
+    except ValueError:
+        return datetime.fromtimestamp(os.path.getmtime(wav_path))
+
+
+def _build_base_filename(timestamp, title):
+    ts_str = timestamp.strftime(FILENAME_TIMESTAMP_FORMAT)
+    title_slug = slugify(title, lowercase=False)[:80]
+
+    return f'{ts_str} - {title_slug}'
+
+
+def _write_markdown(base_dir, timestamp, base_filename, content):
+    month_dir = os.path.join(base_dir, timestamp.strftime(MONTH_FORMAT))
+    os.makedirs(month_dir, exist_ok=True)
+
+    path = os.path.join(month_dir, f'{base_filename}.md')
+    with open(path, 'w') as f:
+        f.write(content)
+
+    return path
+
+
+def _transcript_markdown(title, transcript_text):
+    return f'---\ntitle: {title}\n---\n\n{transcript_text}\n'
+
+
+def _summary_markdown(title, summary_text):
+    return f'---\ntitle: {title}\n---\n\n{summary_text}\n'
+
+
+async def transcribe(wav_path, config=None):
+    if config is None:
+        config = load_config()
+
+    timestamp = _resolve_timestamp(wav_path)
+    tmp_dir = None
+
+    try:
+        mp3_path = _preprocess_audio(wav_path)
+        tmp_dir = os.path.dirname(mp3_path)
+
+        transcript_text = _transcribe_audio(mp3_path, config)
+        title = _generate_title(transcript_text, config)
+        summary_text = _generate_summary(transcript_text, config)
+
+        base_filename = _build_base_filename(timestamp, title)
+
+        transcript_path = _write_markdown(
+            config.transcript_dir, timestamp, base_filename, _transcript_markdown(title, transcript_text),
+        )
+        summary_path = _write_markdown(
+            config.summary_dir, timestamp, base_filename, _summary_markdown(title, summary_text),
+        )
+
+        return {'transcript_path': transcript_path, 'summary_path': summary_path}
+    finally:
+        if tmp_dir and os.path.isdir(tmp_dir):
+            shutil.rmtree(tmp_dir, ignore_errors=True)
