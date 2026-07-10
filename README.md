@@ -61,3 +61,28 @@ as a virtual audio driver. This requires a one-time system setup:
 
 Once set up, `python main.py record` will automatically switch the system output to this
 Multi-Output Device while recording, and restore your original output device when it stops.
+
+## Menu bar app
+
+Instead of running a fixed-duration CLI recording, you can start/stop recordings on demand from
+a macOS menu bar icon:
+
+```
+$ poetry run python main.py menubar
+```
+
+This launches a menu bar icon (🎤 idle / 🔴 recording) with a submenu:
+
+- **Iniciar** — starts a recording (disabled while already recording).
+- **Parar** — stops and saves the current recording (disabled while idle).
+- **Sair** — quits the app, automatically stopping and saving any in-progress recording first.
+
+It uses the same capture logic as `python main.py record` (requires the
+[BlackHole setup](#audio-capture-setup-blackhole) above), and adds:
+
+- A modal alert if starting a recording fails (e.g. microphone or BlackHole device not found).
+- A native macOS notification if the system-audio channel is detected as silent for a sustained
+  period (e.g. the Multi-Output Device isn't selected as system output).
+
+The app runs attached to the terminal it was launched from (no `.app` bundle / Finder launch yet)
+and must be started manually each time — it does not launch at login.
