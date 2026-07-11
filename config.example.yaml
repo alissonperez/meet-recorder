@@ -39,3 +39,40 @@ chunk_duration: 420
 
 # Base URL of the OpenAI-compatible API used for both STT and chat completions.
 base_url: https://openrouter.ai/api/v1
+
+# --- Google Calendar integration (OPTIONAL) ---------------------------------
+# Entirely optional. If the `calendars:` list below is omitted, the calendar
+# feature is disabled and the app behaves exactly as without it: transcription
+# runs with an LLM-generated title and no enrichment, and auto-record is a no-op.
+#
+# For each account name listed here you must provide two files in the config dir
+# (NEVER in .env or in this file):
+#   ~/.config/meet-recorder/credentials/{name}.json  (your Google Cloud OAuth client)
+#   ~/.config/meet-recorder/tokens/{name}.json       (written by `calendar_auth`)
+# Authorize each account once with:
+#   poetry run python main.py calendar_auth --account {name}
+#
+# calendars:
+#   - name: personal
+#   - name: work
+#
+# Recording-anchored match window (minutes). The larger "before" value absorbs
+# starting a recording late (an event that began up to this many minutes ago
+# still matches). Defaults: 60 before / 15 after.
+# calendar_match_before_minutes: 60
+# calendar_match_after_minutes: 15
+#
+# Events whose slugified title contains any of these substrings are ignored by
+# both enrichment and auto-record.
+# ignored_event_slugs:
+#   - lunch
+#   - almoco
+#
+# Max attendee display names captured into frontmatter / summary context.
+# calendar_max_attendees: 20
+#
+# Proactive auto-record scheduler (menu bar app). Requires the app to be running.
+# autorecord:
+#   enabled: false
+#   poll_interval_minutes: 5
+#   notify_before_minutes: 5

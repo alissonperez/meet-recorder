@@ -10,6 +10,7 @@ import httpx
 from openai import OpenAI
 from slugify import slugify
 
+from meet_recorder import calendar
 from meet_recorder.config import load_config
 
 logger = logging.getLogger(__name__)
@@ -158,8 +159,19 @@ def _generate_title(summary_text, config):
     return title[:TITLE_MAX_LENGTH]
 
 
-def _generate_summary(transcript_text, config):
-    return _chat_completion(config.summary_model, config.summary_prompt, transcript_text, config)
+def _event_context(event):
+    lines = [f'Título da reunião: {event.title}']
+    if event.attendees:
+        lines.append('Participantes: ' + ', '.join(event.attendees))
+    return '\n'.join(lines) + '\n\n'
+
+
+def _generate_summary(transcript_text, config, event=None):
+    user_content = transcript_text
+    if event is not None:
+        user_content = _event_context(event) + transcript_text
+
+    return _chat_completion(config.summary_model, config.summary_prompt, user_content, config)
 
 
 def _resolve_timestamp(wav_path):
@@ -194,12 +206,28 @@ def _write_markdown(base_dir, timestamp, base_filename, content):
     return path
 
 
-def _transcript_markdown(title, transcript_text):
-    return f'---\ntitle: {title}\n---\n\n{transcript_text}\n'
+def _frontmatter(title, event):
+    lines = [f'title: {title}']
+
+    if event is not None:
+        lines.append(f'calendar: {event.calendar}')
+        if event.start_raw:
+            lines.append(f'event_start: {event.start_raw}')
+        if event.end_raw:
+            lines.append(f'event_end: {event.end_raw}')
+        if event.attendees:
+            lines.append('attendees:')
+            lines.extend(f'  - {name}' for name in event.attendees)
+
+    return '---\n' + '\n'.join(lines) + '\n---'
 
 
-def _summary_markdown(title, summary_text):
-    return f'---\ntitle: {title}\n---\n\n{summary_text}\n'
+def _transcript_markdown(title, transcript_text, event=None):
+    return f'{_frontmatter(title, event)}\n\n{transcript_text}\n'
+
+
+def _summary_markdown(title, summary_text, event=None):
+    return f'{_frontmatter(title, event)}\n\n{summary_text}\n'
 
 
 async def transcribe(wav_path, config=None):
@@ -207,6 +235,7 @@ async def transcribe(wav_path, config=None):
         config = load_config()
 
     timestamp = _resolve_timestamp(wav_path)
+    event = calendar.find_event(timestamp, config)
     tmp_dir = None
 
     try:
@@ -214,16 +243,16 @@ async def transcribe(wav_path, config=None):
         tmp_dir = os.path.dirname(mp3_path)
 
         transcript_text = _transcribe_audio(mp3_path, config)
-        summary_text = _generate_summary(transcript_text, config)
-        title = _generate_title(summary_text, config)
+        summary_text = _generate_summary(transcript_text, config, event)
+        title = event.title if event is not None else _generate_title(summary_text, config)
 
         transcript_path = _write_markdown(
             config.transcript_dir, timestamp, _build_base_filename(timestamp, title),
-            _transcript_markdown(title, transcript_text),
+            _transcript_markdown(title, transcript_text, event),
         )
         summary_path = _write_markdown(
             config.summary_dir, timestamp, _build_base_filename(timestamp, title, suffix='RESUMO'),
-            _summary_markdown(title, summary_text),
+            _summary_markdown(title, summary_text, event),
         )
 
         return {'transcript_path': transcript_path, 'summary_path': summary_path}

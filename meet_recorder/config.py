@@ -3,9 +3,17 @@ import os
 import yaml
 
 CONFIG_PATH = '~/.config/meet-recorder/config.yaml'
+CONFIG_DIR = '~/.config/meet-recorder'
 
 DEFAULT_BASE_URL = 'https://openrouter.ai/api/v1'
 DEFAULT_CHUNK_DURATION_SECONDS = 7 * 60
+
+DEFAULT_MATCH_BEFORE_MINUTES = 60
+DEFAULT_MATCH_AFTER_MINUTES = 15
+DEFAULT_MAX_ATTENDEES = 20
+
+DEFAULT_AUTORECORD_POLL_INTERVAL_MINUTES = 5
+DEFAULT_AUTORECORD_NOTIFY_BEFORE_MINUTES = 5
 
 REQUIRED_FIELDS = (
     'transcription_model',
@@ -23,6 +31,18 @@ class ConfigError(Exception):
     pass
 
 
+class AutoRecordConfig:
+    def __init__(self, data):
+        data = data or {}
+        self.enabled = bool(data.get('enabled', False))
+        self.poll_interval_minutes = int(
+            data.get('poll_interval_minutes', DEFAULT_AUTORECORD_POLL_INTERVAL_MINUTES)
+        )
+        self.notify_before_minutes = int(
+            data.get('notify_before_minutes', DEFAULT_AUTORECORD_NOTIFY_BEFORE_MINUTES)
+        )
+
+
 class Config:
     def __init__(self, data):
         self.transcription_model = data['transcription_model']
@@ -35,6 +55,34 @@ class Config:
         self.summary_dir = os.path.expanduser(data['summary_dir'])
         self.chunk_duration = int(data.get('chunk_duration', DEFAULT_CHUNK_DURATION_SECONDS))
         self.base_url = data.get('base_url', DEFAULT_BASE_URL)
+
+        # Optional, additive Google Calendar section. Absent -> feature disabled.
+        self.calendars = [c['name'] for c in (data.get('calendars') or [])]
+        self.calendar_match_before_minutes = int(
+            data.get('calendar_match_before_minutes', DEFAULT_MATCH_BEFORE_MINUTES)
+        )
+        self.calendar_match_after_minutes = int(
+            data.get('calendar_match_after_minutes', DEFAULT_MATCH_AFTER_MINUTES)
+        )
+        self.ignored_event_slugs = list(data.get('ignored_event_slugs') or [])
+        self.max_attendees = int(data.get('calendar_max_attendees', DEFAULT_MAX_ATTENDEES))
+        self.autorecord = AutoRecordConfig(data.get('autorecord'))
+
+    @property
+    def calendar_enabled(self):
+        return bool(self.calendars)
+
+
+def config_dir():
+    return os.path.expanduser(CONFIG_DIR)
+
+
+def credentials_path(account):
+    return os.path.join(config_dir(), 'credentials', f'{account}.json')
+
+
+def token_path(account):
+    return os.path.join(config_dir(), 'tokens', f'{account}.json')
 
 
 def load_config(path=None):
