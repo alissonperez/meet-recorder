@@ -46,12 +46,21 @@ class MenubarApp(rumps.App):
         self._ended_notified_events = set()
         self._poll_failures = 0
         self._autorecord_timer = self._build_autorecord_timer()
+        self._autorecord_kickoff_timer = rumps.Timer(self._run_autorecord_kickoff, RECOVERY_SCAN_DELAY_SECONDS)
 
     def run(self, **options):
         self._recovery_timer.start()
         if self._autorecord_timer is not None:
             self._autorecord_timer.start()
+            self._autorecord_kickoff_timer.start()
         super().run(**options)
+
+    def _run_autorecord_kickoff(self, sender):
+        # rumps.Timer only fires for the first time after a full interval, so an
+        # in-progress meeting would wait up to poll_interval_minutes after app
+        # start. Run one immediate poll so restarting mid-meeting records right away.
+        sender.stop()
+        self._run_autorecord_poll(sender)
 
     def _load_config_safe(self):
         try:
@@ -101,6 +110,15 @@ class MenubarApp(rumps.App):
             for orphan_dir in valid_orphans:
                 recorder.delete_orphan(orphan_dir)
 
+    def _notify(self, subtitle, message):
+        # Notifications are best-effort: rumps.notification raises when the running
+        # environment lacks an Info.plist/CFBundleIdentifier (e.g. a bare venv), and
+        # a failed notification must never abort recording or the autorecord poll.
+        try:
+            rumps.notification(title='Meet Recorder', subtitle=subtitle, message=message)
+        except Exception as e:
+            logger.warning(f'Notification failed ({subtitle}: {message}): {e}')
+
     def _autorecord_window_minutes(self):
         autorecord = self.config.autorecord
         return autorecord.notify_before_minutes + autorecord.poll_interval_minutes
@@ -126,11 +144,7 @@ class MenubarApp(rumps.App):
         logger.warning(f'Auto-record poll failed: {error}')
 
         if self._poll_failures == AUTORECORD_FAILURE_NOTIFY_THRESHOLD:
-            rumps.notification(
-                title='Meet Recorder',
-                subtitle='Falha no calendário',
-                message=f'Não foi possível consultar o calendário: {error}',
-            )
+            self._notify('Falha no calendário', f'Não foi possível consultar o calendário: {error}')
 
     def _maybe_notify_upcoming(self, event, now):
         if event.id in self._notified_events or event.start_dt <= now:
@@ -141,11 +155,7 @@ class MenubarApp(rumps.App):
             return
 
         self._notified_events.add(event.id)
-        rumps.notification(
-            title='Meet Recorder',
-            subtitle='Próxima reunião',
-            message=f'{event.title} às {event.start_dt.strftime("%H:%M")}',
-        )
+        self._notify('Próxima reunião', f'{event.title} às {event.start_dt.strftime("%H:%M")}')
 
     def _maybe_autostart(self, event, now):
         if event.id in self._autostarted_events or event.start_dt > now:
@@ -164,11 +174,7 @@ class MenubarApp(rumps.App):
 
         self._set_recording_state(True)
         self._autorecord_event = event
-        rumps.notification(
-            title='Meet Recorder',
-            subtitle='Gravando',
-            message=f'gravando: {event.title}',
-        )
+        self._notify('Gravando', f'gravando: {event.title}')
 
     def _maybe_notify_ended(self, now):
         event = self._autorecord_event
@@ -177,11 +183,7 @@ class MenubarApp(rumps.App):
 
         if event.end_dt is not None and now >= event.end_dt:
             self._ended_notified_events.add(event.id)
-            rumps.notification(
-                title='Meet Recorder',
-                subtitle='Reunião terminou',
-                message=f'reunião terminou — ainda gravando: {event.title}',
-            )
+            self._notify('Reunião terminou', f'reunião terminou — ainda gravando: {event.title}')
 
     def _show_alert(self, title, message, ok=None, cancel=None, other=None):
         # This scan runs on a background timer rather than a user-initiated menu click, so
@@ -216,11 +218,7 @@ class MenubarApp(rumps.App):
                     logger.info(f'Transcription finished for {path}')
                 except Exception as e:
                     logger.error(f'Transcription failed for {path}: {e}')
-                    rumps.notification(
-                        title='Meet Recorder',
-                        subtitle='Transcription failed',
-                        message=str(e),
-                    )
+                    self._notify('Transcription failed', str(e))
         finally:
             self.active_transcriptions -= 1
             self._refresh_title()
@@ -277,20 +275,15 @@ class MenubarApp(rumps.App):
             logger.info(f'Transcription finished for {path}')
         except Exception as e:
             logger.error(f'Transcription failed for {path}: {e}')
-            rumps.notification(
-                title='Meet Recorder',
-                subtitle='Transcription failed',
-                message=str(e),
-            )
+            self._notify('Transcription failed', str(e))
         finally:
             self.active_transcriptions -= 1
             self._refresh_title()
 
     def on_silence_warning(self):
-        rumps.notification(
-            title='Meet Recorder',
-            subtitle='System audio may be silent',
-            message='Check that system output is routed to the Multi-Output Device',
+        self._notify(
+            'System audio may be silent',
+            'Check that system output is routed to the Multi-Output Device',
         )
 
     def on_quit(self, _):
