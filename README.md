@@ -161,6 +161,107 @@ $ poetry run python main.py transcribe --path=<path-to-recording.wav>
 This runs the same pipeline used by the menu bar app's background transcription and writes the
 same transcript/summary output files.
 
+## Google Calendar (optional)
+
+meet-recorder can optionally connect to Google Calendar for two things:
+
+- **Reactive enrichment** — when a recording is transcribed, it's matched to the calendar event
+  it belongs to and the *event's* title is used for the output filenames and frontmatter instead
+  of an LLM-invented one.
+- **Proactive meeting prompt** — the menu bar app watches your upcoming meetings, notifies you of
+  the next one, and at its start time shows a dialog asking whether to start recording — recording
+  never starts silently on its own.
+
+The whole feature is **opt-in**. With no `calendars:` list in `config.yaml`, the app behaves
+exactly as documented above: an LLM-generated title, no enrichment, and no calendar polling.
+
+### Setup
+
+1. **Create a Google Cloud OAuth client.** In the [Google Cloud Console](https://console.cloud.google.com/),
+   create (or reuse) a project, enable the **Google Calendar API**, and create an **OAuth client ID**
+   of type *Desktop app*. Download its JSON.
+2. **Place the credentials file.** Save that JSON as
+   `~/.config/meet-recorder/credentials/{name}.json`, where `{name}` is a logical account name you
+   choose (e.g. `personal`, `work`). Repeat per Google account you want to connect.
+3. **List the accounts in `config.yaml`:**
+
+   ```yaml
+   calendars:
+     - name: personal
+     - name: work
+   ```
+
+4. **Authorize each account once** — this opens a browser for Google's consent screen and writes a
+   token file:
+
+   ```
+   $ poetry run python main.py calendar_auth --account personal
+   ```
+
+Tokens live as files in the config dir (`~/.config/meet-recorder/tokens/{name}.json`, mode `0600`)
+and are **refreshed and re-saved automatically** when they expire. **No calendar secret ever goes
+in `.env`** — `.env` only holds `OPENROUTER_API_KEY`. The requested scope is read-only
+(`calendar.readonly`); meet-recorder never modifies your calendar.
+
+### Reactive enrichment
+
+When a recording is transcribed, its start time (from the `.wav` filename) is matched against your
+calendars over an asymmetric window — by default 60 minutes *before* to 15 minutes *after* the
+recording started. The large "before" value is what absorbs **starting a recording late**: if you
+forget and hit record 20–30 minutes into a meeting, the event still matches. The closest event by
+start-time distance across all accounts wins.
+
+When an event matches:
+
+- its title drives both the transcript and summary **filenames** and the `title:` frontmatter (and
+  the LLM title call is skipped);
+- the frontmatter also gains `calendar`, `event_start`, `event_end`, and `attendees` fields;
+- the event title + attendee names are prepended to the summary prompt for context.
+
+Events you've **declined** are ignored, as are events whose slugified title contains any entry in
+`ignored_event_slugs`:
+
+```yaml
+ignored_event_slugs:
+  - lunch
+  - almoco
+```
+
+Matching keys tuning: `calendar_match_before_minutes`, `calendar_match_after_minutes`. Calendar
+lookup is non-fatal — if it fails, transcription proceeds with the plain LLM title and unenriched
+summary.
+
+### Meeting prompt
+
+Opt in under `autorecord` in `config.yaml`:
+
+```yaml
+autorecord:
+  enabled: true
+  poll_interval_minutes: 5    # how often the menu bar app polls for upcoming meetings
+  notify_before_minutes: 5    # lead time for the "next meeting" notification
+```
+
+With the meeting prompt enabled and at least one calendar configured, the menu bar app polls on a
+background timer and:
+
+- shows a **"próxima reunião"** notification once, when an accepted meeting is within
+  `notify_before_minutes`;
+- at the meeting's start time, shows a **modal dialog** naming the meeting and its start time, with
+  the choice **"Iniciar gravação"** or **"Agora não"**. Recording only starts if you click
+  **"Iniciar gravação"** — the app never starts a recording on its own. Confirming uses the same
+  path as clicking **Iniciar** in the menu, so **Parar** afterward works exactly the same way.
+
+Notes:
+
+- The **app must be running** for the prompt to appear — it pairs naturally with the
+  [launchd login-start](#autostart-at-login-launchd) below.
+- Meetings matching an `ignored_event_slugs` entry never trigger the prompt, and an event that
+  arrives while a recording is already in progress is skipped (no modal, never double-records).
+- The dialog is shown once per event; dismissing it (or ignoring it) means it won't reappear for
+  that meeting.
+- Persistent calendar/auth failures are surfaced via a notification so login-start users notice.
+
 ## Autostart at login (launchd)
 
 The menu bar app can be started automatically when you log into macOS, using a `launchd`

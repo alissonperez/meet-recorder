@@ -58,6 +58,60 @@ def test_load_config_applies_defaults(tmp_path):
     assert config.base_url == DEFAULT_BASE_URL
 
 
+def test_calendar_disabled_when_absent(tmp_path):
+    config_path = tmp_path / 'config.yaml'
+    config_path.write_text(VALID_CONFIG)
+
+    config = load_config(str(config_path))
+
+    assert config.calendars == []
+    assert config.calendar_enabled is False
+    assert config.autorecord.enabled is False
+    assert config.calendar_match_before_minutes == 60
+    assert config.calendar_match_after_minutes == 15
+
+
+def test_calendar_section_parsed(tmp_path):
+    config_path = tmp_path / 'config.yaml'
+    config_path.write_text(VALID_CONFIG + '''
+calendars:
+  - name: personal
+  - name: work
+ignored_event_slugs:
+  - lunch
+calendar_match_before_minutes: 45
+autorecord:
+  enabled: true
+  poll_interval_minutes: 3
+  notify_before_minutes: 10
+''')
+
+    config = load_config(str(config_path))
+
+    assert config.calendars == ['personal', 'work']
+    assert config.calendar_enabled is True
+    assert config.ignored_event_slugs == ['lunch']
+    assert config.calendar_match_before_minutes == 45
+    assert config.autorecord.enabled is True
+    assert config.autorecord.poll_interval_minutes == 3
+    assert config.autorecord.notify_before_minutes == 10
+
+
+def test_credential_and_token_paths(monkeypatch, tmp_path):
+    monkeypatch.setenv('HOME', str(tmp_path))
+    import importlib
+
+    from meet_recorder import config as config_module
+    importlib.reload(config_module)
+
+    assert config_module.credentials_path('personal').endswith(
+        '.config/meet-recorder/credentials/personal.json'
+    )
+    assert config_module.token_path('work').endswith(
+        '.config/meet-recorder/tokens/work.json'
+    )
+
+
 def test_load_config_expands_home_dir(tmp_path, monkeypatch):
     monkeypatch.setenv('HOME', str(tmp_path))
 

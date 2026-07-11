@@ -4,7 +4,7 @@ import time
 
 from icecream import ic
 
-from meet_recorder import consolecolor as ccolor, data, menubar, recorder, transcriber
+from meet_recorder import calendar, consolecolor as ccolor, data, menubar, recorder, transcriber
 from meet_recorder.tools import handler
 
 
@@ -68,6 +68,17 @@ async def handler_transcribe(path):
 
     logger.info(f'Transcript saved to {ccolor.green(result["transcript_path"])}')
     logger.info(f'Summary saved to {ccolor.green(result["summary_path"])}')
+
+
+@handler
+def handler_calendar_auth(account):
+    '''Run the one-time Google OAuth flow for a calendar account and save its token'''
+
+    ic('authorizing calendar account', account)
+
+    token_path = calendar.run_auth_flow(account)
+
+    logger.info(f'Calendar token for {ccolor.green(account)} saved to {ccolor.green(token_path)}')
 
 
 @handler
