@@ -1,6 +1,7 @@
 import os
 
 import yaml
+from slugify import slugify
 
 CONFIG_PATH = '~/.config/meet-recorder/config.yaml'
 CONFIG_DIR = '~/.config/meet-recorder'
@@ -64,7 +65,7 @@ class Config:
         self.calendar_match_after_minutes = int(
             data.get('calendar_match_after_minutes', DEFAULT_MATCH_AFTER_MINUTES)
         )
-        self.ignored_event_slugs = list(data.get('ignored_event_slugs') or [])
+        self.ignored_event_slugs = [slugify(i) for i in list(data.get('ignored_event_slugs') or [])]
         self.max_attendees = int(data.get('calendar_max_attendees', DEFAULT_MAX_ATTENDEES))
         self.autorecord = AutoRecordConfig(data.get('autorecord'))
 

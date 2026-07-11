@@ -79,6 +79,7 @@ calendars:
   - name: work
 ignored_event_slugs:
   - lunch
+  - Lunch Afternoon
 calendar_match_before_minutes: 45
 autorecord:
   enabled: true
@@ -90,7 +91,7 @@ autorecord:
 
     assert config.calendars == ['personal', 'work']
     assert config.calendar_enabled is True
-    assert config.ignored_event_slugs == ['lunch']
+    assert config.ignored_event_slugs == ['lunch', 'lunch-afternoon']
     assert config.calendar_match_before_minutes == 45
     assert config.autorecord.enabled is True
     assert config.autorecord.poll_interval_minutes == 3
