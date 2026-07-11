@@ -5,6 +5,8 @@ from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import yaml
+
 from meet_recorder import transcriber
 
 
@@ -66,30 +68,41 @@ def test_build_base_filename_without_suffix():
 def test_transcript_markdown_has_frontmatter_and_content():
     markdown = transcriber._transcript_markdown('My Title', 'the transcript text')
 
-    assert markdown.startswith('---\ntitle: My Title\n---\n\n')
+    assert markdown.startswith('---\ntitle: "My Title"\n---\n\n')
     assert 'the transcript text' in markdown
 
 
 def test_summary_markdown_has_frontmatter_and_content():
     markdown = transcriber._summary_markdown('My Title', 'the summary text')
 
-    assert markdown.startswith('---\ntitle: My Title\n---\n\n')
+    assert markdown.startswith('---\ntitle: "My Title"\n---\n\n')
     assert 'the summary text' in markdown
 
 
 def test_frontmatter_without_event_is_title_only():
-    assert transcriber._frontmatter('My Title', None) == '---\ntitle: My Title\n---'
+    assert transcriber._frontmatter('My Title', None) == '---\ntitle: "My Title"\n---'
 
 
 def test_frontmatter_with_event_includes_calendar_fields():
     frontmatter = transcriber._frontmatter('My Title', _event())
 
-    assert 'calendar: personal' in frontmatter
-    assert 'event_start: 2024-03-15T10:00:00+00:00' in frontmatter
-    assert 'event_end: 2024-03-15T11:00:00+00:00' in frontmatter
+    assert 'calendar: "personal"' in frontmatter
+    assert 'event_start: "2024-03-15T10:00:00+00:00"' in frontmatter
+    assert 'event_end: "2024-03-15T11:00:00+00:00"' in frontmatter
     assert 'attendees:' in frontmatter
-    assert '  - Alice' in frontmatter
-    assert '  - Bob' in frontmatter
+    assert '  - "Alice"' in frontmatter
+    assert '  - "Bob"' in frontmatter
+
+
+def test_frontmatter_is_valid_yaml_with_special_characters():
+    event = _event(title='1:1: Sync "urgente" \\ #tag', attendees=['José: QA'])
+    frontmatter = transcriber._frontmatter('1:1: Sync "urgente" \\ #tag', event)
+
+    body = frontmatter.removeprefix('---\n').removesuffix('\n---')
+    parsed = yaml.safe_load(body)
+
+    assert parsed['title'] == '1:1: Sync "urgente" \\ #tag'
+    assert parsed['attendees'] == ['José: QA']
 
 
 def test_event_context_includes_title_and_attendees():
@@ -153,8 +166,8 @@ def test_transcribe_uses_event_title_and_skips_llm(monkeypatch, tmp_path):
 
     gen_title.assert_not_called()
     transcript = open(result['transcript_path']).read()
-    assert 'title: Real Meeting' in transcript
-    assert 'calendar: personal' in transcript
+    assert 'title: "Real Meeting"' in transcript
+    assert 'calendar: "personal"' in transcript
     assert 'Real-Meeting' in os.path.basename(result['transcript_path'])
 
 
@@ -176,7 +189,7 @@ def test_transcribe_falls_back_to_llm_title_without_event(monkeypatch, tmp_path)
 
     gen_title.assert_called_once()
     transcript = open(result['transcript_path']).read()
-    assert 'title: LLM Title' in transcript
+    assert 'title: "LLM Title"' in transcript
     assert 'calendar:' not in transcript
 
 

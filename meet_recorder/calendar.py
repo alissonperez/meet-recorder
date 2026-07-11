@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import threading
 from datetime import datetime, timedelta
 
 from slugify import slugify
@@ -10,6 +11,10 @@ from meet_recorder import config as config_module
 logger = logging.getLogger(__name__)
 
 CALENDAR_SCOPES = ['https://www.googleapis.com/auth/calendar.readonly']
+
+# Serializes token file read/refresh/write: menubar transcription threads and the
+# main-thread autorecord poll can both hit the same token file concurrently.
+_token_lock = threading.Lock()
 
 
 class CalendarError(Exception):
@@ -53,17 +58,18 @@ def build_credentials(account):
             f'Token file not found for account "{account}" at {path}; run calendar_auth first'
         )
 
-    try:
-        creds = Credentials.from_authorized_user_file(path, CALENDAR_SCOPES)
-    except (ValueError, KeyError, json.JSONDecodeError) as e:
-        raise CalendarError(f'Token file for account "{account}" is invalid: {e}')
-
-    if creds.expired and creds.refresh_token:
+    with _token_lock:
         try:
-            creds.refresh(Request())
-        except Exception as e:
-            raise CalendarError(f'Failed to refresh token for account "{account}": {e}')
-        _write_token(account, creds)
+            creds = Credentials.from_authorized_user_file(path, CALENDAR_SCOPES)
+        except (ValueError, KeyError, json.JSONDecodeError) as e:
+            raise CalendarError(f'Token file for account "{account}" is invalid: {e}')
+
+        if creds.expired and creds.refresh_token:
+            try:
+                creds.refresh(Request())
+            except Exception as e:
+                raise CalendarError(f'Failed to refresh token for account "{account}": {e}')
+            _write_token(account, creds)
 
     return creds
 
@@ -108,7 +114,7 @@ def _query_events(account, time_min, time_max):
 
 
 def _is_declined(event):
-    for attendee in event.get('attendees', []):
+    for attendee in (event.get('attendees') or []):
         if attendee.get('self') and attendee.get('responseStatus') == 'declined':
             return True
     return False
@@ -123,20 +129,23 @@ def _matches_ignore_slug(event, ignored_slugs):
 
 
 def _parse_boundary(node):
+    if not node:
+        return None
     if 'dateTime' in node:
-        return datetime.fromisoformat(node['dateTime'])
+        dt = datetime.fromisoformat(node['dateTime'])
+        return dt.astimezone() if dt.tzinfo is None else dt
     if 'date' in node:
         return datetime.strptime(node['date'], '%Y-%m-%d').astimezone()
     return None
 
 
 def _raw_boundary(node):
-    return node.get('dateTime') or node.get('date')
+    return (node.get('dateTime') or node.get('date')) if node else None
 
 
 def _attendee_names(event, max_attendees):
     names = []
-    for attendee in event.get('attendees', []):
+    for attendee in (event.get('attendees') or []):
         if attendee.get('resource'):
             continue
         name = attendee.get('displayName') or attendee.get('email')

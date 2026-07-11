@@ -1,4 +1,5 @@
 import base64
+import json
 import logging
 import os
 import shutil
@@ -206,18 +207,25 @@ def _write_markdown(base_dir, timestamp, base_filename, content):
     return path
 
 
+def _yaml_str(value):
+    # JSON string escaping is a subset of YAML double-quoted scalars, so this keeps
+    # frontmatter valid for values with colons, quotes, etc. ensure_ascii=False
+    # preserves accented characters common in Portuguese titles/names.
+    return json.dumps(value, ensure_ascii=False)
+
+
 def _frontmatter(title, event):
-    lines = [f'title: {title}']
+    lines = [f'title: {_yaml_str(title)}']
 
     if event is not None:
-        lines.append(f'calendar: {event.calendar}')
+        lines.append(f'calendar: {_yaml_str(event.calendar)}')
         if event.start_raw:
-            lines.append(f'event_start: {event.start_raw}')
+            lines.append(f'event_start: {_yaml_str(event.start_raw)}')
         if event.end_raw:
-            lines.append(f'event_end: {event.end_raw}')
+            lines.append(f'event_end: {_yaml_str(event.end_raw)}')
         if event.attendees:
             lines.append('attendees:')
-            lines.extend(f'  - {name}' for name in event.attendees)
+            lines.extend(f'  - {_yaml_str(name)}' for name in event.attendees)
 
     return '---\n' + '\n'.join(lines) + '\n---'
 

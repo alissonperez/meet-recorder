@@ -68,6 +68,29 @@ def test_parse_boundary_datetime_and_date():
     assert calendar._parse_boundary({}) is None
 
 
+def test_parse_boundary_handles_none_node():
+    assert calendar._parse_boundary(None) is None
+
+
+def test_parse_boundary_makes_naive_datetime_aware():
+    dt = calendar._parse_boundary({'dateTime': '2024-03-15T10:30:00'})
+
+    assert dt is not None
+    assert dt.tzinfo is not None
+
+
+def test_raw_boundary_handles_none_node():
+    assert calendar._raw_boundary(None) is None
+    assert calendar._raw_boundary({'dateTime': '2024-03-15T10:30:00+00:00'}) == '2024-03-15T10:30:00+00:00'
+
+
+def test_filters_handle_none_attendees():
+    event = {'attendees': None, 'summary': 'Sync'}
+
+    assert calendar._is_declined(event) is False
+    assert calendar._attendee_names(event, max_attendees=20) == []
+
+
 def test_attendee_names_prefers_display_name_and_caps():
     event = {
         'attendees': [
