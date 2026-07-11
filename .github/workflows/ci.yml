@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  pull_request:
+
+jobs:
+  lint-and-test:
+    # macOS runner: the app depends on rumps -> pyobjc, which only builds on macOS.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13.5"
+
+      - name: Install Poetry
+        run: pipx install poetry
+
+      - name: Cache Poetry virtualenv
+        uses: actions/cache@v6
+        with:
+          path: ~/Library/Caches/pypoetry/virtualenvs
+          key: poetry-${{ runner.os }}-${{ hashFiles('poetry.lock') }}
+
+      - name: Install dependencies
+        run: poetry install
+
+      - name: Lint
+        run: make lint
+
+      - name: Test
+        run: make test
