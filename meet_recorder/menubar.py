@@ -40,10 +40,8 @@ class MenubarApp(rumps.App):
         self._recovery_timer = rumps.Timer(self._run_recovery_scan, RECOVERY_SCAN_DELAY_SECONDS)
 
         self.config = self._load_config_safe()
-        self._autorecord_event = None
         self._notified_events = set()
-        self._autostarted_events = set()
-        self._ended_notified_events = set()
+        self._prompted_events = set()
         self._poll_failures = 0
         self._autorecord_timer = self._build_autorecord_timer()
         self._autorecord_kickoff_timer = rumps.Timer(self._run_autorecord_kickoff, RECOVERY_SCAN_DELAY_SECONDS)
@@ -135,9 +133,7 @@ class MenubarApp(rumps.App):
 
         for event in events:
             self._maybe_notify_upcoming(event, now)
-            self._maybe_autostart(event, now)
-
-        self._maybe_notify_ended(now)
+            self._maybe_prompt_start(event, now)
 
     def _on_poll_failure(self, error):
         self._poll_failures += 1
@@ -157,33 +153,32 @@ class MenubarApp(rumps.App):
         self._notified_events.add(event.id)
         self._notify('Próxima reunião', f'{event.title} às {event.start_dt.strftime("%H:%M")}')
 
-    def _maybe_autostart(self, event, now):
-        if event.id in self._autostarted_events or event.start_dt > now:
+    def _maybe_prompt_start(self, event, now):
+        if event.id in self._prompted_events or event.start_dt > now:
             return
 
-        self._autostarted_events.add(event.id)
+        self._prompted_events.add(event.id)
 
         if self.is_recording:
+            return
+
+        response = self._show_alert(
+            title='Reunião começando',
+            message=f'{event.title} às {event.start_dt.strftime("%H:%M")}',
+            ok='Iniciar gravação',
+            cancel='Agora não',
+        )
+        if response != 1:
             return
 
         try:
             recorder.start_recording()
         except Exception as e:
-            logger.error(f'Auto-record failed to start recording for "{event.title}": {e}')
+            logger.error(f'Failed to start recording for "{event.title}": {e}')
+            rumps.alert(title='Falha ao iniciar gravação', message=str(e))
             return
 
         self._set_recording_state(True)
-        self._autorecord_event = event
-        self._notify('Gravando', f'gravando: {event.title}')
-
-    def _maybe_notify_ended(self, now):
-        event = self._autorecord_event
-        if event is None or event.id in self._ended_notified_events or not self.is_recording:
-            return
-
-        if event.end_dt is not None and now >= event.end_dt:
-            self._ended_notified_events.add(event.id)
-            self._notify('Reunião terminou', f'reunião terminou — ainda gravando: {event.title}')
 
     def _show_alert(self, title, message, ok=None, cancel=None, other=None):
         # This scan runs on a background timer rather than a user-initiated menu click, so
@@ -253,7 +248,6 @@ class MenubarApp(rumps.App):
         path = recorder.stop_recording_and_save()
         logger.info(f'Recording saved to {path}')
 
-        self._autorecord_event = None
         self._set_recording_state(False)
 
         thread = threading.Thread(target=self._transcribe_in_background, args=(path,), daemon=True)
@@ -263,7 +257,6 @@ class MenubarApp(rumps.App):
         path = recorder.stop_recording_and_save()
         logger.info(f'Recording saved to {path} (transcription skipped)')
 
-        self._autorecord_event = None
         self._set_recording_state(False)
 
     def _transcribe_in_background(self, path):

@@ -1,14 +1,14 @@
 ## ADDED Requirements
 
-### Requirement: Opt-in auto-record scheduler
-The system SHALL run a background scheduler in the menu bar app that watches upcoming calendar events only when auto-record is enabled in config and calendar is configured, and SHALL otherwise remain inactive.
+### Requirement: Opt-in meeting-prompt scheduler
+The system SHALL run a background scheduler in the menu bar app that watches upcoming calendar events only when the meeting prompt is enabled in config and calendar is configured, and SHALL otherwise remain inactive. The scheduler SHALL never start, stop, or otherwise control recording on its own — any recording start SHALL only happen as a direct result of explicit user confirmation in the start-time modal (see below).
 
-#### Scenario: Auto-record enabled
+#### Scenario: Meeting prompt enabled
 - **WHEN** the menu bar app runs with `autorecord.enabled` true and at least one calendar account configured
-- **THEN** a background timer periodically queries upcoming accepted events and drives notifications and auto-start
+- **THEN** a background timer periodically queries upcoming accepted events and drives the upcoming-meeting notification and the start-time confirmation modal
 
-#### Scenario: Auto-record disabled or calendar unconfigured
-- **WHEN** auto-record is disabled or no calendar is configured
+#### Scenario: Meeting prompt disabled or calendar unconfigured
+- **WHEN** the meeting prompt is disabled or no calendar is configured
 - **THEN** the scheduler performs no calendar queries and the menu bar app behaves exactly as it did before this change
 
 ### Requirement: Upcoming-meeting notification
@@ -18,27 +18,28 @@ The system SHALL show a notification announcing an upcoming accepted meeting whe
 - **WHEN** an accepted, non-ignored event's start time falls within the configured `notify_before_minutes`
 - **THEN** a notification naming the meeting and its start time is shown once for that event
 
-### Requirement: Automatic recording start
-The system SHALL automatically start a recording at an accepted, non-ignored event's start time when no recording is already in progress, and SHALL show a notification indicating recording has started for that meeting.
+### Requirement: Meeting-start confirmation modal
+The system SHALL show a modal dialog (not a passive notification) when an accepted, non-ignored event's start time arrives, stating the meeting's title and start time, and offering the user a choice to start recording or dismiss. The system SHALL start a recording if and only if the user confirms in that dialog.
 
-#### Scenario: Meeting starts and no recording is active
-- **WHEN** an accepted, non-ignored event's start time has arrived and no recording is in progress
-- **THEN** the app starts a recording via the same path as a manual start, updates the menu bar to the recording state, and shows a notification naming the meeting being recorded
+#### Scenario: User confirms the modal
+- **WHEN** an accepted, non-ignored event's start time has arrived and the user confirms the modal (chooses to start recording)
+- **THEN** the app starts a recording via the same path as a manual start and updates the menu bar to the recording state
+
+#### Scenario: User dismisses or declines the modal
+- **WHEN** the user dismisses the modal or explicitly declines to record
+- **THEN** the app does not start a recording and takes no further action for that event
 
 #### Scenario: Meeting starts while already recording
 - **WHEN** an event's start time arrives while a recording is already in progress
-- **THEN** the app does not start a second recording and does not interrupt the current one
+- **THEN** the app does not show the modal (or shows it with recording-already-in-progress reflected) and never starts a second recording or interrupts the current one
 
 #### Scenario: Event matches an ignore-slug
 - **WHEN** an upcoming event's slugified title contains a configured ignore-slug
-- **THEN** the app neither notifies about nor auto-starts a recording for that event
+- **THEN** the app shows neither the upcoming-meeting notification nor the start-time modal for that event
 
-### Requirement: End-of-meeting notification without auto-stop
-The system SHALL notify the user when an auto-started recording passes its event's scheduled end time, and SHALL NOT stop the recording automatically.
-
-#### Scenario: Scheduled end time reached
-- **WHEN** a recording that was auto-started for an event passes that event's end time
-- **THEN** a notification is shown once indicating the scheduled meeting time has ended, and the recording continues until the user stops it manually
+#### Scenario: Modal shown once per event
+- **WHEN** an event's start-time modal has already been shown (confirmed or dismissed)
+- **THEN** the app does not show the modal again for that same event
 
 ### Requirement: Scheduler resilience
 The system SHALL keep the scheduler running across transient calendar failures, logging and retrying on the next poll rather than terminating the timer.

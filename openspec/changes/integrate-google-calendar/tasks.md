@@ -29,27 +29,28 @@
 - [x] 4.5 Confirm filenames use the resolved (event-or-LLM) title via the existing slug/timestamp construction — no filename format change
 - [x] 4.6 Verify: transcribe a recording whose start time falls in a real calendar event and confirm the event title appears in both filenames + frontmatter and no LLM title call was made; transcribe one with no matching event and confirm unchanged behavior
 
-# Phase 3 — Auto-record scheduler (`meeting-autorecord`)
+# Phase 3 — Meeting-prompt scheduler (`meeting-autorecord`)
 
 ## 5. Upcoming-event polling in the menu bar
 - [x] 5.1 Add a `rumps.Timer` in `menubar.py` (mirroring the recovery-scan timer) that runs every `poll_interval_minutes` when `autorecord.enabled` and calendar is configured; otherwise a no-op
 - [x] 5.2 On each poll, query upcoming accepted, non-ignored events (reuse Phase 1 filters, forward-looking window) with per-poll error handling that logs a warning and retries next tick without killing the timer
-- [x] 5.3 Track per-event de-duplication (notify/start/end fired-once) via in-memory sets keyed by event id
+- [x] 5.3 Track per-event de-duplication (upcoming-notify/start-modal fired-once) via in-memory sets keyed by event id
 
-## 6. Notifications and auto-start
+## 6. Notification + start-time confirmation modal
 - [x] 6.1 When an accepted event starts within `notify_before_minutes`, show a one-time `rumps.notification` announcing the next meeting (title + start time)
-- [x] 6.2 When such an event's start time has arrived and `is_recording` is False, call `recorder.start_recording()`, transition menu state exactly like manual "Iniciar", and show a "gravando: <título>" notification; if already recording, skip auto-start
-- [x] 6.3 When a recording auto-started for an event passes the event's end time, show a one-time "reunião terminou — ainda gravando" notification and do **not** stop the recording
+- [x] 6.2 When such an event's start time has arrived, show a one-time modal dialog (`_show_alert`, ok='Iniciar gravação', cancel='Agora não') naming the meeting (title + start time) and asking whether to start recording
+- [x] 6.3 If the user confirms the modal, call `recorder.start_recording()` via the same path as the manual "Iniciar" action and transition menu state exactly like a manual start; if the user cancels/dismisses, take no action — no recording is started and the app does not show the modal again for that event
 - [x] 6.4 Surface persistent calendar/auth failures via a `rumps.notification` so login-start (headless) users notice
+- [x] 6.5 Since the modal is blocking (`_show_alert`/`NSAlert.runModal` runs on the main thread), confirm the poll timer and other menu bar interactions resume normally once the modal is dismissed, and that only one modal can be queued/shown at a time even if two events start close together (verified: `_run_autorecord_poll` processes events sequentially, so a second event's modal only shows after the first is dismissed)
 
 ## 7. Documentation
 - [x] 7.1 Add a README "Google Calendar" section: creating the Google Cloud OAuth client, where to place `credentials/{name}.json`, the `calendars:` config, running `calendar_auth` per account, and that tokens live/refresh as files in the config dir (never `.env`)
 - [x] 7.2 Document the reactive enrichment behavior (event title in filenames/frontmatter, late-start tolerance window, ignore-slugs)
-- [x] 7.3 Document auto-record: config fields, that the app must be running (pairs with launchd login-start), notify-only end behavior, and manual stop
+- [x] 7.3 Document the meeting prompt: config fields, that the app must be running (pairs with launchd login-start), that a modal appears at each meeting's start time, and that recording only starts if the user confirms it
 
 ## 8. Manual verification
 - [ ] 8.1 Reactive: start a recording during a real accepted meeting, stop, and confirm the event title drives both filenames + frontmatter
 - [ ] 8.2 Late-start tolerance: start a recording ~20–30 min into a meeting and confirm it still matches that event
-- [ ] 8.3 Ignore-slug: confirm an event whose slug matches an ignore entry is skipped by both enrichment and auto-record
-- [ ] 8.4 Auto-record: with an accepted upcoming test event, confirm the upcoming notification, the auto-start + start notification at start time, and the end-of-meeting notification with recording still running
+- [ ] 8.3 Ignore-slug: confirm an event whose slug matches an ignore entry is skipped by both enrichment and the meeting prompt
+- [ ] 8.4 Meeting prompt: with an accepted upcoming test event, confirm the upcoming notification fires, the start-time modal appears with the correct title/time, confirming it starts recording, and dismissing it does not start recording
 - [ ] 8.5 Unconfigured: with no `calendars:` section, confirm transcription and the menu bar behave exactly as before this change

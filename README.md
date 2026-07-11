@@ -168,8 +168,9 @@ meet-recorder can optionally connect to Google Calendar for two things:
 - **Reactive enrichment** — when a recording is transcribed, it's matched to the calendar event
   it belongs to and the *event's* title is used for the output filenames and frontmatter instead
   of an LLM-invented one.
-- **Proactive auto-record** — the menu bar app watches your upcoming meetings, notifies you of the
-  next one, and starts recording automatically at its start time.
+- **Proactive meeting prompt** — the menu bar app watches your upcoming meetings, notifies you of
+  the next one, and at its start time shows a dialog asking whether to start recording — recording
+  never starts silently on its own.
 
 The whole feature is **opt-in**. With no `calendars:` list in `config.yaml`, the app behaves
 exactly as documented above: an LLM-generated title, no enrichment, and no calendar polling.
@@ -230,7 +231,7 @@ Matching keys tuning: `calendar_match_before_minutes`, `calendar_match_after_min
 lookup is non-fatal — if it fails, transcription proceeds with the plain LLM title and unenriched
 summary.
 
-### Auto-record
+### Meeting prompt
 
 Opt in under `autorecord` in `config.yaml`:
 
@@ -241,23 +242,24 @@ autorecord:
   notify_before_minutes: 5    # lead time for the "next meeting" notification
 ```
 
-With auto-record enabled and at least one calendar configured, the menu bar app polls on a
+With the meeting prompt enabled and at least one calendar configured, the menu bar app polls on a
 background timer and:
 
 - shows a **"próxima reunião"** notification once, when an accepted meeting is within
   `notify_before_minutes`;
-- **starts recording automatically** at the meeting's start time (if not already recording) and
-  shows a **"gravando: <título>"** notification;
-- when the meeting's scheduled end time passes, shows a **"reunião terminou — ainda gravando"**
-  notification but **does not stop** the recording — stopping stays manual (meetings routinely run
-  over). Use the menu bar's **Parar** as usual.
+- at the meeting's start time, shows a **modal dialog** naming the meeting and its start time, with
+  the choice **"Iniciar gravação"** or **"Agora não"**. Recording only starts if you click
+  **"Iniciar gravação"** — the app never starts a recording on its own. Confirming uses the same
+  path as clicking **Iniciar** in the menu, so **Parar** afterward works exactly the same way.
 
 Notes:
 
-- The **app must be running** for auto-record to work — it pairs naturally with the
+- The **app must be running** for the prompt to appear — it pairs naturally with the
   [launchd login-start](#autostart-at-login-launchd) below.
-- Meetings matching an `ignored_event_slugs` entry are never auto-recorded, and an event that
-  arrives while a recording is already in progress is skipped (never double-records).
+- Meetings matching an `ignored_event_slugs` entry never trigger the prompt, and an event that
+  arrives while a recording is already in progress is skipped (no modal, never double-records).
+- The dialog is shown once per event; dismissing it (or ignoring it) means it won't reappear for
+  that meeting.
 - Persistent calendar/auth failures are surfaced via a notification so login-start users notice.
 
 ## Autostart at login (launchd)
