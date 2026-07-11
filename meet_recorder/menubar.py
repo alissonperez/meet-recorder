@@ -46,6 +46,14 @@ class MenubarApp(rumps.App):
         self._autorecord_timer = self._build_autorecord_timer()
         self._autorecord_kickoff_timer = rumps.Timer(self._run_autorecord_kickoff, RECOVERY_SCAN_DELAY_SECONDS)
 
+        if self._autorecord_timer is None:
+            logger.info('Meeting prompt inactive (see debug log above for why)')
+        else:
+            logger.info(
+                f'Meeting prompt active: polling every {self.config.autorecord.poll_interval_minutes}min, '
+                f'notifying {self.config.autorecord.notify_before_minutes}min before start'
+            )
+
     def run(self, **options):
         self._recovery_timer.start()
         if self._autorecord_timer is not None:
@@ -57,6 +65,7 @@ class MenubarApp(rumps.App):
         # rumps.Timer only fires for the first time after a full interval, so an
         # in-progress meeting would wait up to poll_interval_minutes after app
         # start. Run one immediate poll so restarting mid-meeting records right away.
+        logger.debug('Running immediate meeting-prompt poll on startup')
         sender.stop()
         self._run_autorecord_poll(sender)
 
@@ -64,15 +73,20 @@ class MenubarApp(rumps.App):
         try:
             return load_config()
         except Exception as e:
-            logger.warning(f'Could not load config for auto-record: {e}')
+            logger.warning(f'Could not load config for meeting prompt: {e}')
             return None
 
     def _autorecord_active(self):
-        return (
-            self.config is not None
-            and self.config.autorecord.enabled
-            and self.config.calendar_enabled
-        )
+        if self.config is None:
+            logger.debug('Meeting prompt disabled: config failed to load')
+            return False
+        if not self.config.autorecord.enabled:
+            logger.debug('Meeting prompt disabled: autorecord.enabled is false in config')
+            return False
+        if not self.config.calendar_enabled:
+            logger.debug('Meeting prompt disabled: no `calendars:` configured')
+            return False
+        return True
 
     def _build_autorecord_timer(self):
         if not self._autorecord_active():
@@ -122,14 +136,18 @@ class MenubarApp(rumps.App):
         return autorecord.notify_before_minutes + autorecord.poll_interval_minutes
 
     def _run_autorecord_poll(self, sender):
+        window_minutes = self._autorecord_window_minutes()
+        logger.debug(f'Polling calendar for events within {window_minutes}min')
+
         try:
-            events = calendar.upcoming_events(self.config, self._autorecord_window_minutes())
+            events = calendar.upcoming_events(self.config, window_minutes)
         except Exception as e:
             self._on_poll_failure(e)
             return
 
         self._poll_failures = 0
         now = datetime.now().astimezone()
+        logger.debug(f'Poll returned {len(events)} event(s): {[e.title for e in events]}')
 
         for event in events:
             self._maybe_notify_upcoming(event, now)
@@ -137,31 +155,46 @@ class MenubarApp(rumps.App):
 
     def _on_poll_failure(self, error):
         self._poll_failures += 1
-        logger.warning(f'Auto-record poll failed: {error}')
+        logger.warning(f'Meeting-prompt poll failed: {error}')
 
         if self._poll_failures == AUTORECORD_FAILURE_NOTIFY_THRESHOLD:
             self._notify('Falha no calendário', f'Não foi possível consultar o calendário: {error}')
 
     def _maybe_notify_upcoming(self, event, now):
-        if event.id in self._notified_events or event.start_dt <= now:
+        if event.id in self._notified_events:
+            logger.debug(f'"{event.title}": upcoming notification already shown, skipping')
+            return
+        if event.start_dt <= now:
+            logger.debug(f'"{event.title}": already started ({event.start_dt}), skipping upcoming notification')
             return
 
         minutes_until = (event.start_dt - now).total_seconds() / 60
         if minutes_until > self.config.autorecord.notify_before_minutes:
+            logger.debug(
+                f'"{event.title}": starts in {minutes_until:.1f}min, outside '
+                f'notify_before_minutes={self.config.autorecord.notify_before_minutes}, skipping'
+            )
             return
 
         self._notified_events.add(event.id)
+        logger.info(f'Showing upcoming-meeting notification for "{event.title}" at {event.start_dt}')
         self._notify('Próxima reunião', f'{event.title} às {event.start_dt.strftime("%H:%M")}')
 
     def _maybe_prompt_start(self, event, now):
-        if event.id in self._prompted_events or event.start_dt > now:
+        if event.id in self._prompted_events:
+            logger.debug(f'"{event.title}": start modal already shown, skipping')
+            return
+        if event.start_dt > now:
+            logger.debug(f'"{event.title}": has not started yet ({event.start_dt} > {now}), skipping')
             return
 
         self._prompted_events.add(event.id)
 
         if self.is_recording:
+            logger.debug(f'"{event.title}": already recording, skipping start modal')
             return
 
+        logger.info(f'Showing start-confirmation modal for "{event.title}" ({event.start_dt})')
         response = self._show_alert(
             title='Reunião começando',
             message=f'{event.title} às {event.start_dt.strftime("%H:%M")}',
@@ -169,8 +202,10 @@ class MenubarApp(rumps.App):
             cancel='Agora não',
         )
         if response != 1:
+            logger.info(f'User declined to start recording for "{event.title}" (response={response})')
             return
 
+        logger.info(f'User confirmed recording for "{event.title}", starting')
         try:
             recorder.start_recording()
         except Exception as e:

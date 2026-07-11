@@ -172,11 +172,15 @@ def _extract_event(event, account, max_attendees):
 def _accepted_events(events, config):
     '''Filter raw API events by RSVP and ignore-slug, keeping those with a start.'''
     for event in events:
+        title = event.get('summary', '(sem título)')
         if _is_declined(event):
+            logger.debug(f'"{title}": dropped (declined)')
             continue
         if _matches_ignore_slug(event, config.ignored_event_slugs):
+            logger.debug(f'"{title}": dropped (matches ignored_event_slugs)')
             continue
         if _parse_boundary(event.get('start', {})) is None:
+            logger.debug(f'"{title}": dropped (no parseable start)')
             continue
         yield event
 
@@ -230,11 +234,13 @@ def upcoming_events(config, within_minutes):
     Raises on hard failure so the scheduler can surface it; sorted by start time.'''
     now = datetime.now().astimezone()
     time_max = now + timedelta(minutes=within_minutes)
+    logger.debug(f'Querying upcoming events between {now} and {time_max} for accounts: {config.calendars}')
 
     results = []
     for account in config.calendars:
-        events = _query_events(account, now, time_max)
-        for event in _accepted_events(events, config):
+        raw_events = _query_events(account, now, time_max)
+        logger.debug(f'Account "{account}": {len(raw_events)} raw event(s) from the API')
+        for event in _accepted_events(raw_events, config):
             results.append(_extract_event(event, account, config.max_attendees))
 
     results.sort(key=lambda e: e.start_dt)
