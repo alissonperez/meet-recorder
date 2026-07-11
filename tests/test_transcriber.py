@@ -3,6 +3,8 @@ import subprocess
 from datetime import datetime
 from unittest.mock import Mock
 
+import yaml
+
 from meet_recorder import transcriber
 
 FILENAME_TIMESTAMP_FORMAT = transcriber.FILENAME_TIMESTAMP_FORMAT
@@ -59,6 +61,14 @@ def test_summary_markdown_has_frontmatter_and_content():
 
     assert markdown.startswith('---\ntitle: My Title\n---\n\n')
     assert 'the summary text' in markdown
+
+
+def test_frontmatter_escapes_colons_in_title():
+    frontmatter = transcriber._frontmatter('Meeting: Q1 Planning')
+
+    yaml_body = frontmatter.removeprefix('---\n').removesuffix('\n---')
+    parsed = yaml.safe_load(yaml_body)
+    assert parsed['title'] == 'Meeting: Q1 Planning'
 
 
 def test_generate_title_returns_immediately_when_within_limit(monkeypatch):

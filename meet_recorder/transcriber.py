@@ -7,6 +7,7 @@ import tempfile
 from datetime import datetime
 
 import httpx
+import yaml
 from openai import OpenAI
 from slugify import slugify
 
@@ -194,12 +195,17 @@ def _write_markdown(base_dir, timestamp, base_filename, content):
     return path
 
 
+def _frontmatter(title):
+    yaml_text = yaml.safe_dump({'title': title}, allow_unicode=True, sort_keys=False).strip()
+    return f'---\n{yaml_text}\n---'
+
+
 def _transcript_markdown(title, transcript_text):
-    return f'---\ntitle: {title}\n---\n\n{transcript_text}\n'
+    return f'{_frontmatter(title)}\n\n{transcript_text}\n'
 
 
 def _summary_markdown(title, summary_text):
-    return f'---\ntitle: {title}\n---\n\n{summary_text}\n'
+    return f'{_frontmatter(title)}\n\n{summary_text}\n'
 
 
 async def transcribe(wav_path, config=None):
