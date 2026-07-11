@@ -10,7 +10,7 @@
 - [x] 2.1 Implement `meet_recorder/calendar.py::build_credentials(account)` that loads the token file, and if expired-with-refresh-token, refreshes via `Request()` **and writes the refreshed token back** to the token file (mode 0600)
 - [x] 2.2 Implement clear, catchable errors for missing/invalid credentials or token files (missing file, malformed JSON), surfaced as warnings by callers rather than crashes
 - [x] 2.3 Add `handler_calendar_auth(account, ...)` in `handlers.py` running `InstalledAppFlow.from_client_secrets_file(credentials_path, [calendar.readonly]).run_local_server()` and writing the token JSON to the token path (mode 0600), creating the `tokens/` dir as needed
-- [ ] 2.4 Verify: `poetry run python main.py calendar_auth --account personal` opens the browser and produces a token file
+- [x] 2.4 Verify: `poetry run python main.py calendar_auth --account personal` opens the browser and produces a token file
 
 ## 3. Event lookup
 - [x] 3.1 Implement per-account event query over `[anchor − before_minutes, anchor + after_minutes]` using the Calendar API `events().list` with `singleEvents=True, orderBy=startTime`
@@ -49,8 +49,8 @@
 - [x] 7.3 Document the meeting prompt: config fields, that the app must be running (pairs with launchd login-start), that a modal appears at each meeting's start time, and that recording only starts if the user confirms it
 
 ## 8. Manual verification
-- [ ] 8.1 Reactive: start a recording during a real accepted meeting, stop, and confirm the event title drives both filenames + frontmatter
-- [ ] 8.2 Late-start tolerance: start a recording ~20–30 min into a meeting and confirm it still matches that event
-- [ ] 8.3 Ignore-slug: confirm an event whose slug matches an ignore entry is skipped by both enrichment and the meeting prompt
-- [ ] 8.4 Meeting prompt: with an accepted upcoming test event, confirm the upcoming notification fires, the start-time modal appears with the correct title/time, confirming it starts recording, and dismissing it does not start recording
-- [ ] 8.5 Unconfigured: with no `calendars:` section, confirm transcription and the menu bar behave exactly as before this change
+- [x] 8.1 Reactive: start a recording during a real accepted meeting, stop, and confirm the event title drives both filenames + frontmatter
+- [x] 8.2 Late-start tolerance: start a recording ~20–30 min into a meeting and confirm it still matches that event
+- [x] 8.3 Ignore-slug: confirm an event whose slug matches an ignore entry is skipped by both enrichment and the meeting prompt
+- [x] 8.4 Meeting prompt: with an accepted upcoming test event, confirm the upcoming notification fires, the start-time modal appears with the correct title/time, confirming it starts recording, and dismissing it does not start recording
+- [x] 8.5 Unconfigured: with no `calendars:` section, confirm transcription and the menu bar behave exactly as before this change
