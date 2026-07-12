@@ -10,12 +10,12 @@
             <key>PATH</key>
             <string>/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin</string>
             <key>HOME</key>
-            <string>/Users/85750</string>
+            <string>/Users/YOUR_USERNAME</string>
         </dict>
 
         <key>ProgramArguments</key>
         <array>
-            <string>/Users/85750/wo/personal/meet-recorder/run.sh</string>
+            <string>/path/to/meet-recorder/run.sh</string>
         </array>
 
         <key>RunAtLoad</key>

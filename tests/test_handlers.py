@@ -10,6 +10,38 @@ def _quiet_logger(monkeypatch):
     monkeypatch.setattr(handlers, 'logger', Mock())
 
 
+def test_handler_record_starts_sleeps_for_duration_and_saves(monkeypatch):
+    start_mock = Mock()
+    stop_mock = Mock(return_value='/recordings/out.wav')
+    sleep_mock = Mock()
+    monkeypatch.setattr(handlers.recorder, 'start_recording', start_mock)
+    monkeypatch.setattr(handlers.recorder, 'stop_recording_and_save', stop_mock)
+    monkeypatch.setattr(handlers.time, 'sleep', sleep_mock)
+
+    handlers.handler_record(duration=5)
+
+    start_mock.assert_called_once()
+    sleep_mock.assert_called_once_with(5)
+    stop_mock.assert_called_once()
+
+
+def test_handler_record_still_saves_when_sleep_is_interrupted(monkeypatch):
+    # A verified-no-run-loop-needed design (see design.md D7): ScreenCaptureKit delivery
+    # doesn't depend on the CLI process pumping a run loop, so the plain time.sleep() here
+    # is sufficient - this test locks in that the recording is still saved (via the
+    # try/finally) if that sleep is interrupted, e.g. by Ctrl-C.
+    start_mock = Mock()
+    stop_mock = Mock(return_value='/recordings/out.wav')
+    monkeypatch.setattr(handlers.recorder, 'start_recording', start_mock)
+    monkeypatch.setattr(handlers.recorder, 'stop_recording_and_save', stop_mock)
+    monkeypatch.setattr(handlers.time, 'sleep', Mock(side_effect=KeyboardInterrupt))
+
+    with pytest.raises(KeyboardInterrupt):
+        handlers.handler_record(duration=5)
+
+    stop_mock.assert_called_once()
+
+
 def test_no_orphans_found_does_not_prompt(monkeypatch):
     monkeypatch.setattr(handlers.recorder, 'list_orphan_candidates', Mock(return_value=[]))
     monkeypatch.setattr(handlers.recorder, 'discard_invalid_orphans', Mock(return_value=[]))

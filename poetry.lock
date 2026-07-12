@@ -1273,6 +1273,103 @@ files = [
 pyobjc-core = ">=12.2.1"
 
 [[package]]
+name = "pyobjc-framework-coremedia"
+version = "12.2.1"
+description = "Wrappers for the framework CoreMedia on macOS"
+optional = false
+python-versions = ">=3.10"
+groups = ["main"]
+files = [
+    {file = "pyobjc_framework_coremedia-12.2.1-cp310-cp310-macosx_10_9_universal2.whl", hash = "sha256:97a7b4bc2b53ad207648b4f187e6a7f00a45684db992803bef9aaf5931e0b572"},
+    {file = "pyobjc_framework_coremedia-12.2.1-cp311-cp311-macosx_10_9_universal2.whl", hash = "sha256:38e03a92a7fdf43162faadf354a8497ae764e3b3be26a8ffb107ed5d743cac76"},
+    {file = "pyobjc_framework_coremedia-12.2.1-cp312-cp312-macosx_10_13_universal2.whl", hash = "sha256:fd0e25bc704dd91882bc29d682880c42f712b39bdfe3d3168780d24a9d9eaf26"},
+    {file = "pyobjc_framework_coremedia-12.2.1-cp313-cp313-macosx_10_13_universal2.whl", hash = "sha256:45878f686ce8ea1735ce382b34ef3a5852cafe0ae2a27a49c08701f4c3ab830b"},
+    {file = "pyobjc_framework_coremedia-12.2.1-cp313-cp313t-macosx_10_13_universal2.whl", hash = "sha256:9f2b30ef288c9f2fa1599a1cc5868f8cd949c7138a7f15244c7a6884afcef273"},
+    {file = "pyobjc_framework_coremedia-12.2.1-cp314-cp314-macosx_10_15_universal2.whl", hash = "sha256:84e9fb3f7b6420fc3865a5812604c63546b5777f4999e0e0e830a9a0816e8743"},
+    {file = "pyobjc_framework_coremedia-12.2.1-cp314-cp314t-macosx_10_15_universal2.whl", hash = "sha256:541d64d2fc7576054bdc3508a94f37671e81e5ca1582e16ebec2c0e05dd75412"},
+    {file = "pyobjc_framework_coremedia-12.2.1-cp315-cp315-macosx_10_15_universal2.whl", hash = "sha256:2a355770b66b4caf99560c11af44dfeca53066ece75807fc6a391a16369ccc72"},
+    {file = "pyobjc_framework_coremedia-12.2.1-cp315-cp315t-macosx_10_15_universal2.whl", hash = "sha256:5536453ba631227810a1141fb1761149244bd6d0e7cd4b12477be3b164f5bb11"},
+    {file = "pyobjc_framework_coremedia-12.2.1.tar.gz", hash = "sha256:71b45f7cd52bd997d836c15a0e1016db90815a219dc87fd20435a6f08b87df7b"},
+]
+
+[package.dependencies]
+pyobjc-core = ">=12.2.1"
+pyobjc-framework-Cocoa = ">=12.2.1"
+
+[[package]]
+name = "pyobjc-framework-libdispatch"
+version = "12.2.1"
+description = "Wrappers for libdispatch on macOS"
+optional = false
+python-versions = ">=3.10"
+groups = ["main"]
+files = [
+    {file = "pyobjc_framework_libdispatch-12.2.1-cp310-cp310-macosx_10_9_universal2.whl", hash = "sha256:a47e8c53511eaf739f3972c48e0813bf8fd10dc88dc5543afceaec6554f5c4c2"},
+    {file = "pyobjc_framework_libdispatch-12.2.1-cp311-cp311-macosx_10_9_universal2.whl", hash = "sha256:0e295775c76eace23f60e53ef74b0f79429c665f91a870e4665c4b9887466efa"},
+    {file = "pyobjc_framework_libdispatch-12.2.1-cp312-cp312-macosx_10_13_universal2.whl", hash = "sha256:8f41b5021ff70bc51220a79b41ebd1eacb55fe3ceb67448594f30e491a2c42a5"},
+    {file = "pyobjc_framework_libdispatch-12.2.1-cp313-cp313-macosx_10_13_universal2.whl", hash = "sha256:9c0ebf99520083bf17c007a544c100056a0d4ae5c346fb89e1bdfe6d041f16f2"},
+    {file = "pyobjc_framework_libdispatch-12.2.1-cp313-cp313t-macosx_10_13_universal2.whl", hash = "sha256:3f56fd71b963a0b6e440ed2f0ea2fb635221758b7eb908ba38f96f5144b83ca3"},
+    {file = "pyobjc_framework_libdispatch-12.2.1-cp314-cp314-macosx_10_15_universal2.whl", hash = "sha256:999bad9a2c9198c837ba8f57a3ca9f05b4fc4bf7b69318baaa266dd2ab2fc8f7"},
+    {file = "pyobjc_framework_libdispatch-12.2.1-cp314-cp314t-macosx_10_15_universal2.whl", hash = "sha256:3fc93971f40d9757995c1e4b995a1614a468a5178be27e3d81e9bdc0b5e3cf75"},
+    {file = "pyobjc_framework_libdispatch-12.2.1-cp315-cp315-macosx_10_15_universal2.whl", hash = "sha256:26a096c81c8cf272f4f1bb8f6c4b7565e005d273d218b53b83d925da5292633f"},
+    {file = "pyobjc_framework_libdispatch-12.2.1-cp315-cp315t-macosx_10_15_universal2.whl", hash = "sha256:82c6512fb4985f3bcd6b60b0cff79a4b483b44d1d2e5405010e34dd4b60aa01b"},
+    {file = "pyobjc_framework_libdispatch-12.2.1.tar.gz", hash = "sha256:0d24eda41c6c258135077f60d410e704bc7b5a67adcb2ca463918896c7363795"},
+]
+
+[package.dependencies]
+pyobjc-core = ">=12.2.1"
+pyobjc-framework-Cocoa = ">=12.2.1"
+
+[[package]]
+name = "pyobjc-framework-quartz"
+version = "12.2.1"
+description = "Wrappers for the Quartz frameworks on macOS"
+optional = false
+python-versions = ">=3.10"
+groups = ["main"]
+files = [
+    {file = "pyobjc_framework_quartz-12.2.1-cp310-cp310-macosx_10_9_universal2.whl", hash = "sha256:c8fed57ac8a1927e4fe4f48ab4042cbc1087d881743182b6f3f2e6e227a9209f"},
+    {file = "pyobjc_framework_quartz-12.2.1-cp311-cp311-macosx_10_9_universal2.whl", hash = "sha256:60f29408b4f9ed5391a29c6b63e2aa56ddfb8b66b3fb47962930427981e14462"},
+    {file = "pyobjc_framework_quartz-12.2.1-cp312-cp312-macosx_10_13_universal2.whl", hash = "sha256:de9c8cca7e95290c8d540466af11c7cdfe3a5458e6f56c34006d5b45243f9ed9"},
+    {file = "pyobjc_framework_quartz-12.2.1-cp313-cp313-macosx_10_13_universal2.whl", hash = "sha256:54c9bc7f507192691841ee4eba5bf36990b259df83ac728efed2d7ea1cd021e4"},
+    {file = "pyobjc_framework_quartz-12.2.1-cp313-cp313t-macosx_10_13_universal2.whl", hash = "sha256:bfc0d2badd819823d21df8069dcf9544ce360ed747a8895c51bdb25d8d125f45"},
+    {file = "pyobjc_framework_quartz-12.2.1-cp314-cp314-macosx_10_15_universal2.whl", hash = "sha256:ceb56939c337b36d9d81185ade31f77dc52c85cf79bb16e53e9b32f54b6bb3f5"},
+    {file = "pyobjc_framework_quartz-12.2.1-cp314-cp314t-macosx_10_15_universal2.whl", hash = "sha256:8105c98b798f2bf81c05c54bddeeadbf62f0b5dfec13bd6e719dd2cdf7e1cddf"},
+    {file = "pyobjc_framework_quartz-12.2.1-cp315-cp315-macosx_10_15_universal2.whl", hash = "sha256:bbc214f1a216b5d3651bc832d0ac4589f029f3f37cd6cbb370aac12a7c77942c"},
+    {file = "pyobjc_framework_quartz-12.2.1-cp315-cp315t-macosx_10_15_universal2.whl", hash = "sha256:ca61624a0b0e6286d8a0f97f47eb9011e4e81e9a339db436d48af527e7065bb1"},
+    {file = "pyobjc_framework_quartz-12.2.1.tar.gz", hash = "sha256:b3b8b6f71e66147f8ff9e6213864cc8527e3a0b1ee90835b93ce221f4802d9b0"},
+]
+
+[package.dependencies]
+pyobjc-core = ">=12.2.1"
+pyobjc-framework-Cocoa = ">=12.2.1"
+
+[[package]]
+name = "pyobjc-framework-screencapturekit"
+version = "12.2.1"
+description = "Wrappers for the framework ScreenCaptureKit on macOS"
+optional = false
+python-versions = ">=3.10"
+groups = ["main"]
+files = [
+    {file = "pyobjc_framework_screencapturekit-12.2.1-cp310-cp310-macosx_10_9_universal2.whl", hash = "sha256:18b6770aec984fb129fb1aa10d5d05cc43014b2a475f11302cb0df90a2910b27"},
+    {file = "pyobjc_framework_screencapturekit-12.2.1-cp311-cp311-macosx_10_9_universal2.whl", hash = "sha256:d9be9def5875e800581dade26b45ef66c735c12ceb4a17c5457bebac159903d9"},
+    {file = "pyobjc_framework_screencapturekit-12.2.1-cp312-cp312-macosx_10_13_universal2.whl", hash = "sha256:407dfcd80e493d11ce54163d4cc973119f6a507cd695875f4cdbfde6f2db42d8"},
+    {file = "pyobjc_framework_screencapturekit-12.2.1-cp313-cp313-macosx_10_13_universal2.whl", hash = "sha256:d23bc1d0ac0068f328a97c1ed95d611cb2b8517c76345ddbbd21e5e8bc85a898"},
+    {file = "pyobjc_framework_screencapturekit-12.2.1-cp313-cp313t-macosx_10_13_universal2.whl", hash = "sha256:3269ee9ecc1cde271cffb1e763672469b70375fb6aff00394a0387cc622070ae"},
+    {file = "pyobjc_framework_screencapturekit-12.2.1-cp314-cp314-macosx_10_15_universal2.whl", hash = "sha256:fd1cc27066b907726389bde47aca1afd27c2af13c4eb88b40f3b813082987e01"},
+    {file = "pyobjc_framework_screencapturekit-12.2.1-cp314-cp314t-macosx_10_15_universal2.whl", hash = "sha256:9d4493a95a5eca7b8d5287fda6b2614a1d62def22b24f01eb743fc371c018ae6"},
+    {file = "pyobjc_framework_screencapturekit-12.2.1-cp315-cp315-macosx_10_15_universal2.whl", hash = "sha256:9f6041f81a7a9b4da29fb4ab1cd6912447ccf557cfdea294db3754898895d6b2"},
+    {file = "pyobjc_framework_screencapturekit-12.2.1-cp315-cp315t-macosx_10_15_universal2.whl", hash = "sha256:075f1faf3fb6239b104b2ef6f78f9bf5b0bac062aa48c560c9abfeb629282196"},
+    {file = "pyobjc_framework_screencapturekit-12.2.1.tar.gz", hash = "sha256:e419cbf9c2f9cbd172d1c6e5bc69a44e0a7d9e45cf43058d48eeda4f785ce860"},
+]
+
+[package.dependencies]
+pyobjc-core = ">=12.2.1"
+pyobjc-framework-Cocoa = ">=12.2.1"
+pyobjc-framework-CoreMedia = ">=12.2.1"
+
+[[package]]
 name = "pyparsing"
 version = "3.3.2"
 description = "pyparsing - Classes and methods to define and execute parsing grammars"
@@ -1698,4 +1795,4 @@ zstd = ["backports-zstd (>=1.0.0) ; python_version < \"3.14\""]
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.13"
-content-hash = "e317fb1109f5c92361b49f6ff6466997930c04b4311f6ad28bf405d2e55059ed"
+content-hash = "3a8976244b24e8377e02a32e1aa64b15fc53f356916fa0b1c7689bdb0ed16808"

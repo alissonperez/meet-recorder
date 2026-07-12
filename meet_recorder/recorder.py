@@ -2,7 +2,6 @@ import logging
 import os
 import queue
 import shutil
-import subprocess
 import threading
 import time
 from datetime import datetime
@@ -11,14 +10,23 @@ import numpy as np
 import sounddevice as sd
 import soundfile as sf
 
+from meet_recorder import sck_capture
+
 logger = logging.getLogger(__name__)
 
-SAMPLE_RATE = 44100
-BLACKHOLE_DEVICE_NAME = 'BlackHole'
+SAMPLE_RATE = 16000
+# Must stay 1 (mono). Requesting channelCount=2 from SCStreamConfiguration produces audibly
+# distorted/"robotic" audio on this pyobjc/macOS combination - confirmed by ear across multiple
+# sample rates (16kHz and 48kHz) and reproducible with a clean TTS source with no other audio
+# playing, so it isn't a quality artifact of real-world audio content. The corruption is present
+# independently in each raw channel before any downmixing, so it's not introduced by our own
+# processing - requesting native mono directly from ScreenCaptureKit avoids it entirely. See
+# design.md (migrate-to-screencapturekit) for the full investigation.
+SYS_AUDIO_CHANNELS = 1
 SILENCE_CHECK_INTERVAL_SECONDS = 1.0
+EARLY_NO_BUFFER_CHECK_SECONDS = 5.0
 
 DEFAULT_RECORDINGS_DIR = '~/MeetRecordings'
-DEFAULT_MULTI_OUTPUT_DEVICE_NAME = 'Multi-Output (BlackHole)'
 DEFAULT_SILENCE_RMS_THRESHOLD = 0.001
 DEFAULT_SILENCE_WINDOW_SECONDS = 30.0
 
@@ -27,7 +35,7 @@ IN_PROGRESS_DIR_NAME = '.in-progress'
 # well under 50ms); sizing the queue in chunk count rather than seconds, this comfortably
 # covers several seconds of buffered audio before a writer thread stall would drop frames.
 WRITER_QUEUE_MAXSIZE = 500
-MERGE_BLOCK_FRAMES = 44100
+MERGE_BLOCK_FRAMES = 16000
 
 
 def _default_on_silence_warning():
@@ -40,7 +48,7 @@ on_silence_warning = _default_on_silence_warning
 
 _state = {
     'mic_stream': None,
-    'sys_stream': None,
+    'sys_handle': None,
     'mic_queue': None,
     'sys_queue': None,
     'mic_writer_thread': None,
@@ -50,18 +58,15 @@ _state = {
     'temp_dir': None,
     'silence_buffer': None,
     'silence_buffer_lock': None,
-    'previous_output_device': None,
     'silence_stop_event': None,
     'silence_thread': None,
+    'first_sys_chunk_received': None,
+    'early_check_timer': None,
 }
 
 
 def _recordings_dir():
     return os.path.expanduser(os.environ.get('RECORDINGS_DIR', DEFAULT_RECORDINGS_DIR))
-
-
-def _multi_output_device_name():
-    return os.environ.get('MULTI_OUTPUT_DEVICE_NAME', DEFAULT_MULTI_OUTPUT_DEVICE_NAME)
 
 
 def _silence_rms_threshold():
@@ -77,47 +82,6 @@ def _find_default_mic_device():
     if device_index is None or device_index < 0:
         raise RuntimeError('No default microphone input device found')
     return device_index
-
-
-def _find_blackhole_device():
-    for index, device in enumerate(sd.query_devices()):
-        if BLACKHOLE_DEVICE_NAME.lower() in device['name'].lower() and device['max_input_channels'] > 0:
-            return index
-    raise RuntimeError(f'No input device found matching "{BLACKHOLE_DEVICE_NAME}" - is it installed?')
-
-
-def _get_current_output_device():
-    result = subprocess.run(['SwitchAudioSource', '-c'], capture_output=True, text=True, check=True)
-    return result.stdout.strip()
-
-
-def _set_output_device(name):
-    subprocess.run(['SwitchAudioSource', '-s', name], capture_output=True, text=True, check=True)
-
-
-def _switch_output_to_multi_output_device():
-    try:
-        previous_device = _get_current_output_device()
-    except (FileNotFoundError, subprocess.CalledProcessError) as e:
-        logger.error(f'Could not read current output device via SwitchAudioSource: {e}')
-        return None
-
-    try:
-        _set_output_device(_multi_output_device_name())
-    except (FileNotFoundError, subprocess.CalledProcessError) as e:
-        logger.error(f'Could not switch output device to "{_multi_output_device_name()}": {e}')
-
-    return previous_device
-
-
-def _restore_output_device(previous_device):
-    if not previous_device:
-        return
-
-    try:
-        _set_output_device(previous_device)
-    except (FileNotFoundError, subprocess.CalledProcessError) as e:
-        logger.error(f'Could not restore output device to "{previous_device}": {e}')
 
 
 def _rms(frames):
@@ -198,8 +162,8 @@ def _silence_monitor_loop(stop_event):
                 silent_since = now
             elif not warned and (now - silent_since) >= window_seconds:
                 logger.warning(
-                    f'System audio channel (BlackHole) has been silent for over {window_seconds:.0f}s - '
-                    'check that system output is routed to the Multi-Output Device'
+                    f'System audio channel has been silent for over {window_seconds:.0f}s - '
+                    'check that Screen Recording permission is granted to this process'
                 )
                 on_silence_warning()
                 warned = True
@@ -232,12 +196,34 @@ def _stop_silence_monitor():
     _state['silence_thread'] = None
 
 
+def _check_early_sys_buffers():
+    if not _state['first_sys_chunk_received'].is_set():
+        logger.warning(
+            f'No system-audio buffers received in the first {EARLY_NO_BUFFER_CHECK_SECONDS:.0f}s of '
+            'recording - check that Screen Recording permission is granted to this process'
+        )
+        on_silence_warning()
+
+
+def _start_early_buffer_check():
+    timer = threading.Timer(EARLY_NO_BUFFER_CHECK_SECONDS, _check_early_sys_buffers)
+    timer.daemon = True
+    _state['early_check_timer'] = timer
+    timer.start()
+
+
+def _stop_early_buffer_check():
+    timer = _state['early_check_timer']
+    if timer is not None:
+        timer.cancel()
+    _state['early_check_timer'] = None
+
+
 def start_recording():
     if _state['mic_stream'] is not None:
         raise RuntimeError('A recording is already in progress')
 
     mic_device = _find_default_mic_device()
-    sys_device = _find_blackhole_device()
 
     temp_dir, mic_temp_path, sys_temp_path = _build_temp_paths()
     os.makedirs(temp_dir, exist_ok=True)
@@ -247,12 +233,13 @@ def start_recording():
 
     _state['silence_buffer'] = np.zeros((0, 1), dtype='float32')
     _state['silence_buffer_lock'] = threading.Lock()
+    _state['first_sys_chunk_received'] = threading.Event()
 
     def mic_callback(indata, frames, time_info, status):
         _enqueue(mic_queue, 'mic', indata.copy())
 
-    def sys_callback(indata, frames, time_info, status):
-        chunk = indata.copy()
+    def sys_on_chunk(chunk):
+        _state['first_sys_chunk_received'].set()
         _enqueue(sys_queue, 'sys', chunk)
         _append_to_silence_buffer(chunk)
 
@@ -262,17 +249,13 @@ def start_recording():
     mic_stream = sd.InputStream(
         device=mic_device, samplerate=SAMPLE_RATE, channels=1, dtype='float32', callback=mic_callback,
     )
-    sys_stream = sd.InputStream(
-        device=sys_device, samplerate=SAMPLE_RATE, channels=1, dtype='float32', callback=sys_callback,
-    )
 
-    previous_output_device = _switch_output_to_multi_output_device()
+    sys_handle = sck_capture.start(sys_on_chunk, sample_rate=SAMPLE_RATE, channels=SYS_AUDIO_CHANNELS)
 
     mic_stream.start()
-    sys_stream.start()
 
     _state['mic_stream'] = mic_stream
-    _state['sys_stream'] = sys_stream
+    _state['sys_handle'] = sys_handle
     _state['mic_queue'] = mic_queue
     _state['sys_queue'] = sys_queue
     _state['mic_writer_thread'] = mic_writer_thread
@@ -280,15 +263,19 @@ def start_recording():
     _state['mic_temp_path'] = mic_temp_path
     _state['sys_temp_path'] = sys_temp_path
     _state['temp_dir'] = temp_dir
-    _state['previous_output_device'] = previous_output_device
 
     _start_silence_monitor()
+    _start_early_buffer_check()
 
 
 def _merge_to_stereo(mic_path, sys_path, output_path):
     with sf.SoundFile(mic_path, mode='r') as mic_file, sf.SoundFile(sys_path, mode='r') as sys_file:
+        # Read the rate from the temp file header rather than trusting the module-level
+        # SAMPLE_RATE constant, so an orphan recorded before a SAMPLE_RATE change (e.g. a
+        # pre-migration 44.1kHz recovery) merges at its own rate instead of a mismatched one.
+        samplerate = mic_file.samplerate
         with sf.SoundFile(
-            output_path, mode='w', samplerate=SAMPLE_RATE, channels=2, subtype='PCM_16',
+            output_path, mode='w', samplerate=samplerate, channels=2, subtype='PCM_16',
         ) as out_file:
             while True:
                 mic_block = mic_file.read(frames=MERGE_BLOCK_FRAMES, dtype='float32', always_2d=True)
@@ -323,22 +310,20 @@ def stop_recording_and_save():
         raise RuntimeError('No recording is in progress')
 
     try:
+        _stop_early_buffer_check()
         _stop_silence_monitor()
 
         _state['mic_stream'].stop()
         _state['mic_stream'].close()
-        _state['sys_stream'].stop()
-        _state['sys_stream'].close()
+        sck_capture.stop(_state['sys_handle'])
 
         _stop_writer(_state['mic_queue'], _state['mic_writer_thread'])
         _stop_writer(_state['sys_queue'], _state['sys_writer_thread'])
 
         return merge_and_cleanup(_state['mic_temp_path'], _state['sys_temp_path'], _state['temp_dir'])
     finally:
-        _restore_output_device(_state['previous_output_device'])
-
         _state['mic_stream'] = None
-        _state['sys_stream'] = None
+        _state['sys_handle'] = None
         _state['mic_queue'] = None
         _state['sys_queue'] = None
         _state['mic_writer_thread'] = None
@@ -348,7 +333,7 @@ def stop_recording_and_save():
         _state['temp_dir'] = None
         _state['silence_buffer'] = None
         _state['silence_buffer_lock'] = None
-        _state['previous_output_device'] = None
+        _state['first_sys_chunk_received'] = None
 
 
 def _build_output_path():
