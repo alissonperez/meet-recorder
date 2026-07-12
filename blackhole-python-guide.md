@@ -1,5 +1,10 @@
 # Guia: Capturar áudio do sistema no macOS com BlackHole + Python
 
+> **Superado por [`screencapture-guide.md`](./screencapture-guide.md).** O projeto migrou a
+> captura de áudio do sistema de BlackHole para ScreenCaptureKit (ver
+> `openspec/changes/migrate-to-screencapturekit/`), eliminando a dependência do driver virtual e
+> a troca automática de output device. Este guia fica mantido como referência histórica.
+
 Objetivo: gravar o áudio que está tocando no computador (ex: chamada de vídeo) junto
 com o microfone, usando Python — sem depender de ScreenCaptureKit/Swift.
 

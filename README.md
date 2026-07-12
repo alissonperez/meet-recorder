@@ -32,35 +32,39 @@ $ pipenv run python main.py --help
 make lint
 ```
 
-## Audio capture setup (BlackHole)
+## Audio capture setup (ScreenCaptureKit)
 
 Recording captures both your microphone and the computer's system audio (e.g. the other
-participants in a call) at the same time, using [BlackHole](https://existential.audio/blackhole/)
-as a virtual audio driver. This requires a one-time system setup:
+participants in a call) at the same time. System audio is captured via
+[ScreenCaptureKit](https://developer.apple.com/documentation/screencapturekit) (macOS 13+),
+which reads system audio directly from the OS with no virtual audio driver and no output-device
+switching — your system volume stays normally controllable throughout a recording.
 
-1. Install the required Homebrew packages:
+This requires the running process to have the macOS **Screen Recording** permission (the same
+permission screen-recording apps use; audio capture rides on it because there's no separate
+"system audio capture" TCC permission prior to macOS 14.2's Core Audio Process Taps API):
 
-   ```
-   brew install blackhole-2ch switchaudio-osx
-   ```
+1. The first time you record, macOS prompts for Screen Recording permission. Grant it in
+   **System Settings → Privacy & Security → Screen Recording**.
+2. The permission is granted **per invoking process**, and running the same code from a
+   different launcher (e.g. Terminal vs. a `launchd` LaunchAgent) can trigger a *separate*
+   prompt attributed to a different binary — see [Autostart at login](#autostart-at-login-launchd)
+   below if you're setting up auto-start. If a recording produces no system audio and no error,
+   re-check this setting for the process that's actually running (`ps` its PID and compare).
+3. If permission is missing entirely, recording fails fast with a clear
+   `ScreenCaptureKitError`-style message rather than silently producing an empty channel.
 
-2. Restart Core Audio so the new virtual device appears:
+### Echo from speaker bleed into the microphone
 
-   ```
-   sudo killall -9 coreaudiod
-   ```
-
-3. Create a Multi-Output Device (one-time, manual):
-   - Open **Audio MIDI Setup** (Spotlight → "Audio MIDI Setup").
-   - Click `+` in the bottom-left corner → **Create Multi-Output Device**.
-   - Check the boxes for your physical output (e.g. "MacBook Pro Speakers" or your headphones)
-     and **"BlackHole 2ch"**.
-   - Check **"Drift Correction"** next to BlackHole (reduces desync on longer recordings).
-   - Rename the device to `Multi-Output (BlackHole)` (or set `MULTI_OUTPUT_DEVICE_NAME` in
-     `.env` if you name it differently — see `.env.example`).
-
-Once set up, `python main.py record` will automatically switch the system output to this
-Multi-Output Device while recording, and restore your original output device when it stops.
+The microphone and system-audio channels are recorded separately and never mixed (channel 0 =
+mic, channel 1 = system audio), but if system audio is playing out loud through your speakers
+while you record, the physical microphone picks up that same audio from the room — at a lower
+volume and with a slight delay — in addition to your own voice. Played back together, this sounds
+like an echo. This isn't a bug in the capture pipeline; it's inherent to recording mic + system
+audio simultaneously with audible speaker output, and isn't specific to ScreenCaptureKit (the
+previous BlackHole/Multi-Output Device setup had the same behavior, since it also routed audio to
+real speakers alongside the virtual driver). **Use headphones while recording to eliminate it
+entirely** — with nothing playing out loud, the microphone has nothing to pick back up.
 
 ## Menu bar app
 
@@ -95,11 +99,13 @@ The icon reflects two independent, combinable states — recording and transcrib
 No count of in-progress transcriptions is shown, only presence/absence of each state.
 
 It uses the same capture logic as `python main.py record` (requires the
-[BlackHole setup](#audio-capture-setup-blackhole) above), and adds:
+[ScreenCaptureKit setup](#audio-capture-setup-screencapturekit) above), and adds:
 
-- A modal alert if starting a recording fails (e.g. microphone or BlackHole device not found).
+- A modal alert if starting a recording fails (e.g. no default microphone, or Screen Recording
+  permission missing/denied).
 - A native macOS notification if the system-audio channel is detected as silent for a sustained
-  period (e.g. the Multi-Output Device isn't selected as system output).
+  period, or if no system-audio buffers arrive at all shortly after starting (both point at the
+  Screen Recording permission — see setup above).
 - A native macOS notification if a background transcription fails (see
   [Transcription](#transcription) below); the app keeps running and the original recording is
   left untouched, so it can be retried later via the `transcribe` CLI command.
@@ -328,9 +334,14 @@ $ rm ~/Library/LaunchAgents/com.alisson.meet-recorder.plist
 
 - Only the app/menu bar icon starts automatically — no recording starts on its own; you still
   click **Iniciar**.
-- On this machine, starting the app via launchd did not trigger a new microphone/screen-recording
-  permission prompt beyond what was already granted to the terminal-launched process. If you see
-  a new prompt on a different machine, grant it once and it should persist across restarts.
+- **Screen Recording permission under launchd is separate from the terminal-launched grant.**
+  Unlike the microphone permission, Screen Recording is attributed to the specific binary macOS
+  identifies as responsible for the process — when launched via this LaunchAgent, that resolves
+  to the Poetry venv's `python` executable, not to Terminal/iTerm. The first time a recording
+  runs under launchd, expect a separate System Settings prompt even if you already granted it
+  while testing from a terminal; grant it once and it persists across restarts (but the venv's
+  path includes a content hash and can change on `make clear && make setup`, which may require
+  re-granting).
 
 ## License
 
