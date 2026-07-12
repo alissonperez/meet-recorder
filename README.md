@@ -54,6 +54,18 @@ permission screen-recording apps use; audio capture rides on it because there's 
 3. If permission is missing entirely, recording fails fast with a clear
    `ScreenCaptureKitError`-style message rather than silently producing an empty channel.
 
+### Echo from speaker bleed into the microphone
+
+The microphone and system-audio channels are recorded separately and never mixed (channel 0 =
+mic, channel 1 = system audio), but if system audio is playing out loud through your speakers
+while you record, the physical microphone picks up that same audio from the room — at a lower
+volume and with a slight delay — in addition to your own voice. Played back together, this sounds
+like an echo. This isn't a bug in the capture pipeline; it's inherent to recording mic + system
+audio simultaneously with audible speaker output, and isn't specific to ScreenCaptureKit (the
+previous BlackHole/Multi-Output Device setup had the same behavior, since it also routed audio to
+real speakers alongside the virtual driver). **Use headphones while recording to eliminate it
+entirely** — with nothing playing out loud, the microphone has nothing to pick back up.
+
 ## Menu bar app
 
 Instead of running a fixed-duration CLI recording, you can start/stop recordings on demand from
