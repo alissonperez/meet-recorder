@@ -1,8 +1,41 @@
 Meet Recorder
 =============================================
 
+Record your meetings on macOS — microphone and system audio together — and turn them into
+Markdown transcripts and LLM-generated summaries, optionally enriched with your Google Calendar.
+
+> **Note:** only macOS is supported for now. The audio capture (ScreenCaptureKit), menu bar app,
+> and autostart (launchd) are all built on macOS-specific APIs.
+
+## Features
+
+- **Dual-channel audio recording** — captures your microphone and the computer's system audio
+  (the other call participants) simultaneously into a single stereo WAV file (channel 0 = mic,
+  channel 1 = system audio), using [ScreenCaptureKit](#audio-capture-setup-screencapturekit) —
+  no virtual audio driver, no output-device switching, system volume stays controllable.
+- **[Menu bar app](#menu-bar-app)** — start/stop recordings on demand from a macOS menu bar
+  icon, with status icons for the recording/transcribing states and native notifications for
+  failures (e.g. silent system audio, transcription errors).
+- **[Transcription + summary](#transcription)** — after a recording stops, it's chunked,
+  transcribed via an OpenAI-compatible API (OpenRouter by default), and written out as a
+  full-text Markdown transcript plus a structured Markdown summary with an LLM-generated title.
+  The source `.wav` is never deleted or moved, so transcription can always be re-run.
+- **[Google Calendar integration](#google-calendar-optional)** *(optional)* — matches each
+  recording to the calendar event it belongs to (using the event's title and attendees in the
+  output), and prompts you at a meeting's start time asking whether to record — recording never
+  starts silently on its own. Read-only scope; supports multiple Google accounts.
+- **[Autostart at login](#autostart-at-login-launchd)** — a `launchd` LaunchAgent setup to keep
+  the menu bar app running from login, with auto-relaunch if it exits.
+- **Crash recovery** — `python main.py recover` scans for orphaned in-progress recordings left
+  behind by a crash and lets you process, ignore, or delete each one.
+- **CLI commands** for everything: `record` (fixed-duration recording), `menubar`, `transcribe`
+  (re-run the pipeline on any existing `.wav`), `calendar_auth`, and `recover` — see
+  `poetry run python main.py --help`.
+
 ## Requirements
 
+- **macOS 13+** (Ventura or later): the only supported OS for now — system-audio capture relies
+  on ScreenCaptureKit.
 - Python 3.13.0 (in [`.python-version`](./.python-version)): Recommended to use [pyenv](https://github.com/pyenv/pyenv) to manage your python versions.
 - **Poetry**: See how to install poetry [here](https://python-poetry.org/docs/#installing-with-pipx).
 
