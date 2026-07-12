@@ -197,7 +197,10 @@ def _stop_silence_monitor():
 
 
 def _check_early_sys_buffers():
-    if not _state['first_sys_chunk_received'].is_set():
+    # timer.cancel() in _stop_early_buffer_check() can't stop a timer that has already fired,
+    # so this can run concurrently with (or after) stop_recording_and_save() clearing _state.
+    event = _state['first_sys_chunk_received']
+    if event is not None and not event.is_set():
         logger.warning(
             f'No system-audio buffers received in the first {EARLY_NO_BUFFER_CHECK_SECONDS:.0f}s of '
             'recording - check that Screen Recording permission is granted to this process'
@@ -246,13 +249,31 @@ def start_recording():
     mic_writer_thread = _start_writer(mic_queue, mic_temp_path)
     sys_writer_thread = _start_writer(sys_queue, sys_temp_path)
 
-    mic_stream = sd.InputStream(
-        device=mic_device, samplerate=SAMPLE_RATE, channels=1, dtype='float32', callback=mic_callback,
-    )
+    mic_stream = None
+    sys_handle = None
+    try:
+        mic_stream = sd.InputStream(
+            device=mic_device, samplerate=SAMPLE_RATE, channels=1, dtype='float32', callback=mic_callback,
+        )
 
-    sys_handle = sck_capture.start(sys_on_chunk, sample_rate=SAMPLE_RATE, channels=SYS_AUDIO_CHANNELS)
+        sys_handle = sck_capture.start(sys_on_chunk, sample_rate=SAMPLE_RATE, channels=SYS_AUDIO_CHANNELS)
 
-    mic_stream.start()
+        mic_stream.start()
+    except Exception:
+        _stop_writer(mic_queue, mic_writer_thread)
+        _stop_writer(sys_queue, sys_writer_thread)
+        if mic_stream is not None:
+            try:
+                mic_stream.close()
+            except Exception as e:
+                logger.error(f'Error closing mic stream during start_recording failure cleanup: {e}')
+        if sys_handle is not None:
+            sck_capture.stop(sys_handle)
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        _state['silence_buffer'] = None
+        _state['silence_buffer_lock'] = None
+        _state['first_sys_chunk_received'] = None
+        raise
 
     _state['mic_stream'] = mic_stream
     _state['sys_handle'] = sys_handle
@@ -313,8 +334,14 @@ def stop_recording_and_save():
         _stop_early_buffer_check()
         _stop_silence_monitor()
 
-        _state['mic_stream'].stop()
-        _state['mic_stream'].close()
+        try:
+            _state['mic_stream'].stop()
+        except Exception as e:
+            logger.error(f'Error stopping mic stream: {e}')
+        try:
+            _state['mic_stream'].close()
+        except Exception as e:
+            logger.error(f'Error closing mic stream: {e}')
         sck_capture.stop(_state['sys_handle'])
 
         _stop_writer(_state['mic_queue'], _state['mic_writer_thread'])

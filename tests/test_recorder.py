@@ -184,6 +184,16 @@ def test_check_early_sys_buffers_silent_when_chunk_already_received(monkeypatch)
     warning_hook.assert_not_called()
 
 
+def test_check_early_sys_buffers_noop_when_state_already_cleared(monkeypatch):
+    recorder._state['first_sys_chunk_received'] = None
+    warning_hook = MagicMock()
+    monkeypatch.setattr(recorder, 'on_silence_warning', warning_hook)
+
+    recorder._check_early_sys_buffers()
+
+    warning_hook.assert_not_called()
+
+
 def test_start_recording_uses_sck_capture_for_system_audio(tmp_path, monkeypatch):
     monkeypatch.setenv('RECORDINGS_DIR', str(tmp_path))
     monkeypatch.setattr(recorder.sd.default, 'device', (0, 0))
@@ -237,3 +247,86 @@ def test_start_recording_forwards_sck_chunks_through_sys_queue(tmp_path, monkeyp
     assert recorder._state['first_sys_chunk_received'].is_set() is True
 
     recorder.stop_recording_and_save()
+
+
+def _spy_on_start_writer(monkeypatch):
+    '''Let the real _start_writer/_stop_writer run (so cleanup is genuine), but record the
+    threads created so failure-path tests can assert they were actually joined.'''
+    threads = []
+    original = recorder._start_writer
+
+    def spy(*args, **kwargs):
+        thread = original(*args, **kwargs)
+        threads.append(thread)
+        return thread
+
+    monkeypatch.setattr(recorder, '_start_writer', spy)
+    return threads
+
+
+def test_start_recording_cleans_up_when_sck_capture_start_fails(tmp_path, monkeypatch):
+    monkeypatch.setenv('RECORDINGS_DIR', str(tmp_path))
+    monkeypatch.setattr(recorder.sd.default, 'device', (0, 0))
+    threads = _spy_on_start_writer(monkeypatch)
+
+    mic_stream = MagicMock()
+    monkeypatch.setattr(recorder.sd, 'InputStream', MagicMock(return_value=mic_stream))
+    monkeypatch.setattr(recorder.sck_capture, 'start', MagicMock(side_effect=RuntimeError('no permission')))
+    sck_stop = MagicMock()
+    monkeypatch.setattr(recorder.sck_capture, 'stop', sck_stop)
+
+    with pytest.raises(RuntimeError, match='no permission'):
+        recorder.start_recording()
+
+    assert len(threads) == 2
+    assert all(not t.is_alive() for t in threads)
+    mic_stream.close.assert_called_once()
+    sck_stop.assert_not_called()
+    assert recorder._state['mic_stream'] is None
+    assert recorder._state['sys_handle'] is None
+    assert recorder.list_orphan_candidates() == []
+
+
+def test_start_recording_cleans_up_when_mic_stream_start_fails(tmp_path, monkeypatch):
+    monkeypatch.setenv('RECORDINGS_DIR', str(tmp_path))
+    monkeypatch.setattr(recorder.sd.default, 'device', (0, 0))
+    threads = _spy_on_start_writer(monkeypatch)
+
+    mic_stream = MagicMock()
+    mic_stream.start.side_effect = RuntimeError('PortAudio error')
+    monkeypatch.setattr(recorder.sd, 'InputStream', MagicMock(return_value=mic_stream))
+    fake_handle = MagicMock()
+    monkeypatch.setattr(recorder.sck_capture, 'start', MagicMock(return_value=fake_handle))
+    sck_stop = MagicMock()
+    monkeypatch.setattr(recorder.sck_capture, 'stop', sck_stop)
+
+    with pytest.raises(RuntimeError, match='PortAudio error'):
+        recorder.start_recording()
+
+    assert len(threads) == 2
+    assert all(not t.is_alive() for t in threads)
+    mic_stream.close.assert_called_once()
+    sck_stop.assert_called_once_with(fake_handle)
+    assert recorder._state['mic_stream'] is None
+    assert recorder._state['sys_handle'] is None
+    assert recorder.list_orphan_candidates() == []
+
+
+def test_stop_recording_still_stops_writers_and_merges_when_mic_stream_stop_raises(tmp_path, monkeypatch):
+    monkeypatch.setenv('RECORDINGS_DIR', str(tmp_path))
+    monkeypatch.setattr(recorder.sd.default, 'device', (0, 0))
+
+    mic_stream = MagicMock()
+    mic_stream.stop.side_effect = RuntimeError('device disconnected')
+    monkeypatch.setattr(recorder.sd, 'InputStream', MagicMock(return_value=mic_stream))
+    monkeypatch.setattr(recorder.sck_capture, 'start', MagicMock(return_value=MagicMock()))
+    monkeypatch.setattr(recorder.sck_capture, 'stop', MagicMock())
+
+    recorder.start_recording()
+
+    path = recorder.stop_recording_and_save()
+
+    assert os.path.isfile(path)
+    mic_stream.close.assert_called_once()
+    assert recorder._state['mic_stream'] is None
+    assert recorder._state['sys_handle'] is None

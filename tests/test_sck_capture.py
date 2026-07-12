@@ -25,6 +25,15 @@ def test_float32_stereo_to_mono_passthrough_for_mono_input():
     np.testing.assert_allclose(mono.flatten(), [0.25, -0.75])
 
 
+def test_float32_stereo_to_mono_mono_input_takes_the_view_fast_path():
+    raw = np.array([0.25, -0.75], dtype='float32').tobytes()
+
+    mono = sck_capture.float32_stereo_to_mono(raw, channels=1)
+
+    # a reshape-only view (no np.mean/.astype copy) keeps a reference to the base buffer
+    assert mono.base is not None
+
+
 def test_float32_stereo_to_mono_empty_buffer():
     mono = sck_capture.float32_stereo_to_mono(b'', channels=2)
 

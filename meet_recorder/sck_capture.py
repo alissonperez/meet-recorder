@@ -40,6 +40,8 @@ SCStreamDelegateProtocol = objc.protocolNamed('SCStreamDelegate')
 def float32_stereo_to_mono(raw_bytes, channels):
     '''Convert raw interleaved Float32 bytes from an SCStream audio buffer to a mono (n, 1) array.'''
     samples = np.frombuffer(raw_bytes, dtype='float32')
+    if channels == 1:
+        return samples.reshape(-1, 1)
     frames = samples.reshape(-1, channels)
     return np.mean(frames, axis=1, keepdims=True).astype('float32')
 
