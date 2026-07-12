@@ -45,7 +45,7 @@ Markdown transcripts and LLM-generated summaries, optionally enriched with your 
 $ make setup
 ```
 
-To clean up all app env (removing pipenv env, for example):
+To clean up all app env (removing the poetry env, for example):
 
 ```
 $ make clear
@@ -56,7 +56,7 @@ $ make clear
 Fill a `.env` based on `.env.example` and then:
 
 ```
-$ pipenv run python main.py --help
+$ poetry run python main.py --help
 ```
 
 ## How to lint
