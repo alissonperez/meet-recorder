@@ -5,8 +5,26 @@ TBD - created by archiving change capture-audio-blackhole. Update Purpose after 
 
 ## Requirements
 
+### Requirement: System-audio capture prerequisites
+The system SHALL capture system audio via ScreenCaptureKit, which requires macOS 13 or later and the macOS Screen Recording permission granted to the process that runs the application, and SHALL NOT require any virtual audio driver (such as BlackHole), any Multi-Output Device configuration, or the `SwitchAudioSource` binary.
+
+#### Scenario: Recording works without BlackHole installed
+- **WHEN** a recording is started on a machine that has Screen Recording permission granted but no BlackHole driver, no Multi-Output Device, and no `SwitchAudioSource` binary installed
+- **THEN** the recording starts successfully and captures both microphone and system audio
+
+#### Scenario: Missing Screen Recording permission produces a clear failure signal
+- **WHEN** a recording is started while the running process lacks Screen Recording permission
+- **THEN** the system either raises a clear error at start, or — if the stream starts but delivers no audio buffers — emits a warning that points at the Screen Recording permission, rather than failing silently
+
+### Requirement: System volume remains user-controllable during recording
+The system SHALL leave the macOS output-device configuration and routing untouched while recording, so that the user can adjust system volume normally for the entire duration of a recording.
+
+#### Scenario: Volume adjusted mid-recording
+- **WHEN** the user changes the system output volume while a recording is in progress
+- **THEN** the audible output volume changes normally, the recording continues uninterrupted, and the captured system-audio signal is unaffected by the volume change being possible
+
 ### Requirement: Dual-source stereo recording
-The system SHALL simultaneously capture audio from the system's default microphone input and from the BlackHole 2ch input, writing each source incrementally to its own temporary file on disk during recording, and SHALL merge them at stop time into a single stereo WAV file where channel 0 contains the microphone signal and channel 1 contains the system-audio signal, without mixing or summing the two signals.
+The system SHALL simultaneously capture audio from the system's default microphone input (via the audio input API) and from the system-audio output (via a ScreenCaptureKit stream with audio capture enabled), converting the system-audio stream's Float32 interleaved buffers to mono, writing each source incrementally to its own temporary file on disk during recording, and SHALL merge them at stop time into a single stereo WAV file where channel 0 contains the microphone signal and channel 1 contains the system-audio signal, without mixing or summing the two signals.
 
 #### Scenario: Recording captures both sources into one file
 - **WHEN** a recording is started and later stopped after audio has played through the system and the user has spoken into the microphone
@@ -14,7 +32,11 @@ The system SHALL simultaneously capture audio from the system's default micropho
 
 #### Scenario: Recording quality
 - **WHEN** a recording is started
-- **THEN** audio is captured at a 44.1kHz sample rate
+- **THEN** audio is captured at a 16kHz sample rate on both channels
+
+#### Scenario: Multi-channel system audio is downmixed to mono
+- **WHEN** the ScreenCaptureKit stream delivers multi-channel (e.g. stereo) Float32 audio buffers
+- **THEN** the channels are downmixed into a single mono signal before being written to the system-audio temporary file
 
 ### Requirement: Bounded-memory incremental capture
 The system SHALL write captured audio frames for each source (microphone, system-audio) to disk incrementally during recording, rather than accumulating the full recording in memory, so that memory usage during capture does not grow proportionally with recording duration.
@@ -38,27 +60,16 @@ The system SHALL produce the final stereo WAV file by reading the two per-source
 - **WHEN** the two per-source temporary files differ in length (e.g. one source stopped receiving frames slightly earlier than the other)
 - **THEN** the final stereo file's length is truncated to the length of the shorter of the two sources, consistent with existing dual-source recording behavior
 
-### Requirement: Automatic output device switching
-The system SHALL automatically switch the macOS default audio output device to the Multi-Output Device when a recording starts, and SHALL restore the audio output device that was active immediately before the recording started when the recording stops.
-
-#### Scenario: Output switched on record start
-- **WHEN** a recording is started while the system output is set to some device D
-- **THEN** the system output is switched to the Multi-Output Device before capture begins
-
-#### Scenario: Output restored on record stop
-- **WHEN** a recording that switched the output from device D to the Multi-Output Device is stopped
-- **THEN** the system output is switched back to device D
-
 ### Requirement: System-audio silence warning
-The system SHALL monitor the RMS signal level of the system-audio (BlackHole) channel while recording, using a bounded rolling buffer that covers only the most recent silence-detection window rather than the full recording history, and SHALL emit a warning log if that channel remains silent (RMS at or near zero) for a sustained period, without stopping the recording.
+The system SHALL monitor the RMS signal level of the system-audio (ScreenCaptureKit) channel while recording, using a bounded rolling buffer that covers only the most recent silence-detection window rather than the full recording history, and SHALL emit a warning if that channel remains silent (RMS at or near zero) for a sustained period, pointing the user at the Screen Recording permission as the likely cause, without stopping the recording.
 
 #### Scenario: Sustained silence on system channel triggers a warning
 - **WHEN** a recording is in progress and the system-audio channel has RMS at or near zero for a sustained period
-- **THEN** a warning is logged indicating the system audio appears silent, and the recording continues uninterrupted
+- **THEN** a warning is emitted indicating the system audio appears silent and suggesting the Screen Recording permission be checked, and the recording continues uninterrupted
 
 #### Scenario: Active system audio does not trigger a warning
 - **WHEN** a recording is in progress and the system-audio channel has non-trivial RMS
-- **THEN** no silence warning is logged
+- **THEN** no silence warning is emitted
 
 #### Scenario: Silence detection does not require the full recording history
 - **WHEN** a recording has been running long enough that its full history would no longer fit comfortably in memory
