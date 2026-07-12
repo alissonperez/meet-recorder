@@ -4,6 +4,7 @@ version = "0.1.0"
 description = ""
 authors = ["Alisson R. Perez <756802+alissonperez@users.noreply.github.com>"]
 readme = "README.md"
+license = "AGPL-3.0-or-later"
 
 [tool.poetry.dependencies]
 python = "^3.13"

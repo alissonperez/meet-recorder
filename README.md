@@ -268,25 +268,29 @@ The menu bar app can be started automatically when you log into macOS, using a `
 LaunchAgent:
 
 - [`run.sh`](./run.sh) — wrapper script that `cd`s into the project directory (so `.env` is
-  found) and invokes the poetry venv's Python directly with `main.py menubar`.
+  found) and invokes `poetry run python main.py menubar`.
 - [`com.alisson.meet-recorder.plist`](./com.alisson.meet-recorder.plist) — the LaunchAgent
   definition: `RunAtLoad` (start at login) + `KeepAlive` (relaunch if the process exits), with
   stdout/stderr redirected to log files.
 
 Both files live at the repo root.
 
-### Finding/updating the poetry venv Python path
+### Before installing: edit the plist placeholders
 
-`run.sh` hardcodes the venv's Python path in `VENV_PYTHON`, since launchd's minimal environment
-doesn't reliably have `poetry` on `PATH`. Find the current path with:
+`com.alisson.meet-recorder.plist` ships with placeholder paths. Edit `HOME` and
+`ProgramArguments` to point at your own username and the absolute path where you cloned the
+repo:
 
+```xml
+<key>HOME</key>
+<string>/Users/YOUR_USERNAME</string>
+...
+<string>/path/to/meet-recorder/run.sh</string>
 ```
-$ poetry env info --path
-```
 
-Append `/bin/python` to that path. If the venv is ever deleted and recreated (e.g. after
-`make clear` + `make setup`), its hashed path changes — re-run the command above and update
-`VENV_PYTHON` in `run.sh` accordingly.
+`run.sh` itself needs no editing — it resolves its own directory and runs `poetry run`, so it
+works from wherever the repo lives, as long as `poetry` is on the `PATH` set in the plist
+(`/opt/homebrew/bin` by default).
 
 ### Install
 
@@ -304,7 +308,7 @@ $ tail -f /tmp/com.alisson.meet-recorder.out
 $ tail -f /tmp/com.alisson.meet-recorder.err
 ```
 
-If the icon doesn't appear after loading, check `.err` first — a bad `VENV_PYTHON` path or
+If the icon doesn't appear after loading, check `.err` first — a bad `HOME`/project path or
 missing `.env` will show up there. `KeepAlive` will keep relaunching the process even if it's
 crashing immediately, so a tight restart loop in the logs is a sign something's misconfigured.
 
@@ -327,3 +331,7 @@ $ rm ~/Library/LaunchAgents/com.alisson.meet-recorder.plist
 - On this machine, starting the app via launchd did not trigger a new microphone/screen-recording
   permission prompt beyond what was already granted to the terminal-launched process. If you see
   a new prompt on a different machine, grant it once and it should persist across restarts.
+
+## License
+
+[GNU AGPL v3.0](./LICENSE)
