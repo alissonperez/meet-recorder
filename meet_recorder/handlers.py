@@ -4,33 +4,11 @@ import time
 
 from icecream import ic
 
-from meet_recorder import calendar, consolecolor as ccolor, data, menubar, recorder, transcriber
+from meet_recorder import calendar, consolecolor as ccolor, menubar, recorder, transcriber
 from meet_recorder.tools import handler
 
 
 logger = logging.getLogger(__name__)
-
-
-@handler
-def handler_quotation(dryrun=False):
-    '''Simple method to show current quotation of USD / BRL'''
-
-    ic('getting quotation', dryrun)
-
-    quotation = data.get_quotation(True, dryrun)
-
-    logger.info('Quotation USD-BRL, ask for: {}'.format(ccolor.green('R$ {}'.format(quotation['USDBRL']['ask']))))
-    logger.warn('Quotation USD-BRL, ask for: {}'.format(ccolor.green('R$ {}'.format(quotation['USDBRL']['ask']))))
-    logger.error('Quotation USD-BRL, ask for: {}'.format(ccolor.green('R$ {}'.format(quotation['USDBRL']['ask']))))
-
-
-def handler_read_csv(filename, verbose=True, dryrun=False):
-    '''Read a CSV file and print its content'''
-
-    ic('reading CSV file')
-
-    for line in data.read_csv(filename):
-        logger.info(f'Content: {ccolor.green(line)}')
 
 
 @handler
