@@ -31,6 +31,7 @@ DEFAULT_SILENCE_RMS_THRESHOLD = 0.001
 DEFAULT_SILENCE_WINDOW_SECONDS = 30.0
 
 IN_PROGRESS_DIR_NAME = '.in-progress'
+TIMESTAMP_FORMAT = '%Y-%m-%d_%H-%M-%S'
 # sounddevice delivers frequent small callbacks (blocksize chosen by PortAudio, typically
 # well under 50ms); sizing the queue in chunk count rather than seconds, this comfortably
 # covers several seconds of buffered audio before a writer thread stall would drop frames.
@@ -91,7 +92,7 @@ def _rms(frames):
 
 
 def _build_temp_paths():
-    timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+    timestamp = datetime.now().strftime(TIMESTAMP_FORMAT)
     temp_dir = os.path.join(_recordings_dir(), IN_PROGRESS_DIR_NAME, timestamp)
     return temp_dir, os.path.join(temp_dir, 'mic.wav'), os.path.join(temp_dir, 'sys.wav')
 
@@ -316,7 +317,8 @@ def _merge_to_stereo(mic_path, sys_path, output_path):
 
 
 def merge_and_cleanup(mic_path, sys_path, temp_dir):
-    path = _build_output_path()
+    timestamp = os.path.basename(temp_dir)
+    path = _build_output_path(timestamp)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     _merge_to_stereo(mic_path, sys_path, path)
 
@@ -363,8 +365,7 @@ def stop_recording_and_save():
         _state['first_sys_chunk_received'] = None
 
 
-def _build_output_path():
-    timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+def _build_output_path(timestamp):
     return os.path.join(_recordings_dir(), f'{timestamp}.wav')
 
 

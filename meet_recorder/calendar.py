@@ -120,6 +120,13 @@ def _is_declined(event):
     return False
 
 
+def _is_accepted(event):
+    for attendee in (event.get('attendees') or []):
+        if attendee.get('self'):
+            return attendee.get('responseStatus') == 'accepted'
+    return False
+
+
 def _matches_ignore_slug(event, ignored_slugs):
     if not ignored_slugs:
         return False
@@ -224,7 +231,10 @@ def _find_event(anchor, config):
     if not candidates:
         return None
 
-    distance, account, event = min(candidates, key=lambda c: c[0])
+    accepted_candidates = [c for c in candidates if _is_accepted(c[2])]
+    tier = accepted_candidates if accepted_candidates else candidates
+
+    distance, account, event = min(tier, key=lambda c: c[0])
     return _extract_event(event, account, config.max_attendees)
 
 
