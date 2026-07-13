@@ -190,11 +190,13 @@ def test_is_accepted_true_only_for_self_accepted():
     tentative = {'attendees': [{'self': True, 'responseStatus': 'tentative'}]}
     no_response = {'attendees': [{'self': True, 'responseStatus': 'needsAction'}]}
     other_accepted = {'attendees': [{'self': False, 'responseStatus': 'accepted'}]}
+    organizer_self = {'organizer': {'self': True}}
 
     assert calendar._is_accepted(accepted) is True
     assert calendar._is_accepted(tentative) is False
     assert calendar._is_accepted(no_response) is False
     assert calendar._is_accepted(other_accepted) is False
+    assert calendar._is_accepted(organizer_self) is True
     assert calendar._is_accepted({}) is False
 
 

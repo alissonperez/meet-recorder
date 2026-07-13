@@ -158,7 +158,7 @@ def test_merge_and_cleanup_names_output_after_temp_dir_start_timestamp(tmp_path,
     _write_mono_wav(mic_path, [0.1, 0.2])
     _write_mono_wav(sys_path, [0.3, 0.4])
 
-    output_path = recorder.merge_and_cleanup(str(mic_path), str(sys_path), str(temp_dir))
+    output_path = recorder.merge_and_cleanup(str(mic_path), str(sys_path), str(temp_dir) + os.sep)
 
     assert os.path.basename(output_path) == f'{start_timestamp}.wav'
 

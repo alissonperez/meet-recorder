@@ -121,6 +121,8 @@ def _is_declined(event):
 
 
 def _is_accepted(event):
+    if (event.get('organizer') or {}).get('self'):
+        return True
     for attendee in (event.get('attendees') or []):
         if attendee.get('self'):
             return attendee.get('responseStatus') == 'accepted'
@@ -176,8 +178,8 @@ def _extract_event(event, account, max_attendees):
     )
 
 
-def _accepted_events(events, config):
-    '''Filter raw API events by RSVP and ignore-slug, keeping those with a start.'''
+def _eligible_events(events, config):
+    '''Filter raw API events by decline/ignore status, keeping those with a parseable start.'''
     for event in events:
         title = event.get('summary', '(sem título)')
         if _is_declined(event):
@@ -195,9 +197,11 @@ def _accepted_events(events, config):
 # --- Public lookup APIs ------------------------------------------------------
 
 def find_event(anchor, config):
-    '''Return the accepted event closest to `anchor` across all accounts, or None.
+    '''Return the best-matching event closest to `anchor` across all accounts, or None.
 
-    Non-fatal: any error (unconfigured, auth, network) logs a warning and returns None.'''
+    Accepted events are preferred over tentative/unanswered ones; within the winning
+    tier the closest by start-time distance wins. Non-fatal: any error (unconfigured,
+    auth, network) logs a warning and returns None.'''
     if not config.calendar_enabled:
         return None
 
@@ -223,7 +227,7 @@ def _find_event(anchor, config):
             logger.warning(f'Calendar query failed for account "{account}": {e}')
             continue
 
-        for event in _accepted_events(events, config):
+        for event in _eligible_events(events, config):
             start = _parse_boundary(event.get('start', {}))
             distance = abs((start - anchor).total_seconds())
             candidates.append((distance, account, event))
@@ -239,7 +243,7 @@ def _find_event(anchor, config):
 
 
 def upcoming_events(config, within_minutes):
-    '''Return accepted, non-ignored events starting within [now, now + within_minutes].
+    '''Return non-declined, non-ignored events starting within [now, now + within_minutes].
 
     Raises on hard failure so the scheduler can surface it; sorted by start time.'''
     now = datetime.now().astimezone()
@@ -250,7 +254,7 @@ def upcoming_events(config, within_minutes):
     for account in config.calendars:
         raw_events = _query_events(account, now, time_max)
         logger.debug(f'Account "{account}": {len(raw_events)} raw event(s) from the API')
-        for event in _accepted_events(raw_events, config):
+        for event in _eligible_events(raw_events, config):
             results.append(_extract_event(event, account, config.max_attendees))
 
     results.sort(key=lambda e: e.start_dt)

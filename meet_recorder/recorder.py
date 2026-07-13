@@ -317,7 +317,7 @@ def _merge_to_stereo(mic_path, sys_path, output_path):
 
 
 def merge_and_cleanup(mic_path, sys_path, temp_dir):
-    timestamp = os.path.basename(temp_dir)
+    timestamp = os.path.basename(os.path.normpath(temp_dir))
     path = _build_output_path(timestamp)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     _merge_to_stereo(mic_path, sys_path, path)
