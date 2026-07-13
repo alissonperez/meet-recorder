@@ -147,6 +147,68 @@ def test_merge_and_cleanup_returns_path_and_removes_temp_dir(tmp_path, monkeypat
     assert not os.path.exists(temp_dir)
 
 
+def test_merge_and_cleanup_names_output_after_temp_dir_start_timestamp(tmp_path, monkeypatch):
+    monkeypatch.setenv('RECORDINGS_DIR', str(tmp_path / 'recordings'))
+
+    start_timestamp = '2026-01-01_10-00-00'
+    temp_dir = tmp_path / start_timestamp
+    temp_dir.mkdir()
+    mic_path = temp_dir / 'mic.wav'
+    sys_path = temp_dir / 'sys.wav'
+    _write_mono_wav(mic_path, [0.1, 0.2])
+    _write_mono_wav(sys_path, [0.3, 0.4])
+
+    output_path = recorder.merge_and_cleanup(str(mic_path), str(sys_path), str(temp_dir) + os.sep)
+
+    assert os.path.basename(output_path) == f'{start_timestamp}.wav'
+
+
+def test_merge_and_cleanup_uses_start_timestamp_not_stop_time(tmp_path, monkeypatch):
+    monkeypatch.setenv('RECORDINGS_DIR', str(tmp_path / 'recordings'))
+
+    start_timestamp = '2026-01-01_10-00-00'
+    temp_dir = tmp_path / start_timestamp
+    temp_dir.mkdir()
+    mic_path = temp_dir / 'mic.wav'
+    sys_path = temp_dir / 'sys.wav'
+    _write_mono_wav(mic_path, [0.1, 0.2])
+    _write_mono_wav(sys_path, [0.3, 0.4])
+
+    class _LaterDatetime:
+        @staticmethod
+        def now():
+            # Simulates a long recording where stop-time wall clock is far past start time.
+            from datetime import datetime as real_datetime
+            return real_datetime(2026, 1, 1, 23, 0, 0)
+
+    monkeypatch.setattr(recorder, 'datetime', _LaterDatetime)
+
+    output_path = recorder.merge_and_cleanup(str(mic_path), str(sys_path), str(temp_dir))
+
+    assert os.path.basename(output_path) == f'{start_timestamp}.wav'
+
+
+def test_merge_and_cleanup_names_output_from_orphan_dir_timestamp(tmp_path, monkeypatch):
+    # Mirrors the shape used by handler_recover() / menubar crash-recovery: orphan_dir is
+    # RECORDINGS_DIR/.in-progress/<start-timestamp>/, and merge_and_cleanup is called with it
+    # directly as temp_dir - same function, same fix as the live stop-and-save path.
+    recordings_dir = tmp_path / 'recordings'
+    monkeypatch.setenv('RECORDINGS_DIR', str(recordings_dir))
+
+    start_timestamp = '2026-02-01_09-15-00'
+    orphan_dir = recordings_dir / recorder.IN_PROGRESS_DIR_NAME / start_timestamp
+    orphan_dir.mkdir(parents=True)
+    mic_path = orphan_dir / 'mic.wav'
+    sys_path = orphan_dir / 'sys.wav'
+    _write_mono_wav(mic_path, [0.1, 0.2])
+    _write_mono_wav(sys_path, [0.3, 0.4])
+
+    output_path = recorder.merge_and_cleanup(str(mic_path), str(sys_path), str(orphan_dir))
+
+    assert os.path.basename(output_path) == f'{start_timestamp}.wav'
+    assert not os.path.exists(orphan_dir)
+
+
 def test_merge_to_stereo_preserves_source_sample_rate_for_pre_migration_orphans(tmp_path):
     mic_path = tmp_path / 'mic.wav'
     sys_path = tmp_path / 'sys.wav'

@@ -171,6 +171,34 @@ def test_transcribe_uses_event_title_and_skips_llm(monkeypatch, tmp_path):
     assert 'Real-Meeting' in os.path.basename(result['transcript_path'])
 
 
+def test_transcribe_derives_filenames_and_month_folder_from_start_time_filename(monkeypatch, tmp_path):
+    work_dir = tmp_path / 'work'
+    work_dir.mkdir()
+    monkeypatch.setattr(transcriber, '_preprocess_audio', lambda p: str(work_dir / 'a.mp3'))
+    monkeypatch.setattr(transcriber, '_transcribe_audio', lambda m, c: 'transcript text')
+    monkeypatch.setattr(transcriber, '_generate_summary', lambda t, c, e=None: 'summary text')
+    monkeypatch.setattr(transcriber, '_generate_title', Mock(return_value='LLM Title'))
+    monkeypatch.setattr(transcriber.calendar, 'find_event', lambda ts, c: None)
+
+    # Filename reflects the recording's start time; wav mtime (stop/save time) differs, e.g.
+    # for a long recording that crossed into the next month.
+    wav = tmp_path / '2024-03-15_10-00-00.wav'
+    wav.write_bytes(b'')
+    later_mtime = datetime(2024, 4, 1, 2, 0, 0).timestamp()
+    os.utime(str(wav), (later_mtime, later_mtime))
+
+    result = asyncio.run(transcriber.transcribe(str(wav), config=_transcribe_config(tmp_path)))
+
+    expected_timestamp = transcriber._resolve_timestamp(str(wav))
+    expected_display_ts = transcriber._format_display_timestamp(expected_timestamp)
+
+    assert '2024-03' in result['transcript_path']
+    assert '2024-04' not in result['transcript_path']
+    assert expected_display_ts in os.path.basename(result['transcript_path'])
+    assert '2024-03' in result['summary_path']
+    assert expected_display_ts in os.path.basename(result['summary_path'])
+
+
 def test_transcribe_falls_back_to_llm_title_without_event(monkeypatch, tmp_path):
     work_dir = tmp_path / 'work'
     work_dir.mkdir()

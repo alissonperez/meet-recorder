@@ -182,8 +182,8 @@ adjust it. All fields are required unless noted otherwise:
 | `base_url` | *(optional, default `https://openrouter.ai/api/v1`)* Base URL of the OpenAI-compatible API used for both transcription and chat completions. |
 
 Output files are named `TIMESTAMP - Title-Slug.md`, where `TIMESTAMP` and the `YYYY-MM` folder
-are derived from the recording's own timestamp, and `Title-Slug` is the generated title slugified
-(and capped to 80 characters).
+are derived from the recording's start time (parsed from the `.wav` filename), and `Title-Slug`
+is the generated title slugified (and capped to 80 characters).
 
 See [`pipeline-transcricao.md`](./pipeline-transcricao.md) at the repo root for the prior-art
 pipeline (from an earlier, separate project) that this transcription approach — chunking,
@@ -247,8 +247,9 @@ in `.env`** — `.env` only holds `OPENROUTER_API_KEY`. The requested scope is r
 When a recording is transcribed, its start time (from the `.wav` filename) is matched against your
 calendars over an asymmetric window — by default 60 minutes *before* to 15 minutes *after* the
 recording started. The large "before" value is what absorbs **starting a recording late**: if you
-forget and hit record 20–30 minutes into a meeting, the event still matches. The closest event by
-start-time distance across all accounts wins.
+forget and hit record 20–30 minutes into a meeting, the event still matches. Events you've accepted
+("Yes") are preferred over ones you've only tentatively responded to ("Maybe") or left unanswered;
+within the winning tier, the closest event by start-time distance across all accounts wins.
 
 When an event matches:
 

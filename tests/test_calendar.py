@@ -185,6 +185,82 @@ def test_find_event_none_when_no_candidates(monkeypatch):
     assert calendar.find_event(datetime.now(UTC), _config()) is None
 
 
+def test_is_accepted_true_only_for_self_accepted():
+    accepted = {'attendees': [{'self': True, 'responseStatus': 'accepted'}]}
+    tentative = {'attendees': [{'self': True, 'responseStatus': 'tentative'}]}
+    no_response = {'attendees': [{'self': True, 'responseStatus': 'needsAction'}]}
+    other_accepted = {'attendees': [{'self': False, 'responseStatus': 'accepted'}]}
+    organizer_self = {'organizer': {'self': True}}
+
+    assert calendar._is_accepted(accepted) is True
+    assert calendar._is_accepted(tentative) is False
+    assert calendar._is_accepted(no_response) is False
+    assert calendar._is_accepted(other_accepted) is False
+    assert calendar._is_accepted(organizer_self) is True
+    assert calendar._is_accepted({}) is False
+
+
+def test_find_event_prefers_accepted_over_closer_tentative(monkeypatch):
+    anchor = datetime(2024, 3, 15, 10, 0, tzinfo=UTC)
+
+    tentative = _event(
+        'Maybe Sync', anchor + timedelta(minutes=1),
+        attendees=[{'self': True, 'responseStatus': 'tentative'}], event_id='tentative',
+    )
+    accepted = _event(
+        'Yes Sync', anchor + timedelta(minutes=10),
+        attendees=[{'self': True, 'responseStatus': 'accepted'}], event_id='accepted',
+    )
+
+    monkeypatch.setattr(calendar, '_query_events', lambda a, mn, mx: [tentative, accepted])
+
+    result = calendar.find_event(anchor, _config())
+
+    assert result.id == 'accepted'
+
+
+def test_find_event_falls_back_to_tentative_when_no_accepted_qualifies(monkeypatch):
+    anchor = datetime(2024, 3, 15, 10, 0, tzinfo=UTC)
+
+    tentative_near = _event(
+        'Maybe Near', anchor + timedelta(minutes=1),
+        attendees=[{'self': True, 'responseStatus': 'tentative'}], event_id='near',
+    )
+    tentative_far = _event(
+        'Maybe Far', anchor + timedelta(minutes=10),
+        attendees=[{'self': True, 'responseStatus': 'tentative'}], event_id='far',
+    )
+
+    monkeypatch.setattr(calendar, '_query_events', lambda a, mn, mx: [tentative_near, tentative_far])
+
+    result = calendar.find_event(anchor, _config())
+
+    assert result.id == 'near'
+
+
+def test_find_event_still_excludes_declined_and_ignored_across_tiers(monkeypatch):
+    anchor = datetime(2024, 3, 15, 10, 0, tzinfo=UTC)
+
+    declined = _event(
+        'Declined', anchor,
+        attendees=[{'self': True, 'responseStatus': 'declined'}], event_id='declined',
+    )
+    ignored = _event(
+        'Daily Lunch', anchor + timedelta(minutes=1),
+        attendees=[{'self': True, 'responseStatus': 'accepted'}], event_id='ignored',
+    )
+    tentative = _event(
+        'Maybe Planning', anchor + timedelta(minutes=5),
+        attendees=[{'self': True, 'responseStatus': 'tentative'}], event_id='good',
+    )
+
+    monkeypatch.setattr(calendar, '_query_events', lambda a, mn, mx: [declined, ignored, tentative])
+
+    result = calendar.find_event(anchor, _config(ignored_event_slugs=['lunch']))
+
+    assert result.id == 'good'
+
+
 # --- upcoming_events ---------------------------------------------------------
 
 def test_upcoming_events_filters_and_sorts(monkeypatch):
