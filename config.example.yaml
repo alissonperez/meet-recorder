@@ -74,5 +74,7 @@ base_url: https://openrouter.ai/api/v1
 # Proactive auto-record scheduler (menu bar app). Requires the app to be running.
 # autorecord:
 #   enabled: false
-#   poll_interval_minutes: 5
+#   calendar_poll_interval_minutes: 5
+#   check_interval_seconds: 60
 #   notify_before_minutes: 5
+#   max_meeting_age_minutes: 20

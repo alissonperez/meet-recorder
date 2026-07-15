@@ -43,31 +43,39 @@ class MenubarApp(rumps.App):
         self._notified_events = set()
         self._prompted_events = set()
         self._poll_failures = 0
-        self._autorecord_timer = self._build_autorecord_timer()
-        self._autorecord_kickoff_timer = rumps.Timer(self._run_autorecord_kickoff, RECOVERY_SCAN_DELAY_SECONDS)
+        self._cached_events = []
+        self._calendar_poll_timer = self._build_calendar_poll_timer()
+        self._meeting_check_timer = (
+            rumps.Timer(self._run_meeting_check, self.config.autorecord.check_interval_seconds)
+            if self._autorecord_active() else None
+        )
+        self._calendar_poll_kickoff_timer = rumps.Timer(self._run_calendar_poll_kickoff, RECOVERY_SCAN_DELAY_SECONDS)
 
-        if self._autorecord_timer is None:
+        if self._calendar_poll_timer is None:
             logger.info('Meeting prompt inactive (see debug log above for why)')
         else:
             logger.info(
-                f'Meeting prompt active: polling every {self.config.autorecord.poll_interval_minutes}min, '
+                f'Meeting prompt active: polling every {self.config.autorecord.calendar_poll_interval_minutes}min, '
+                f'checking every {self.config.autorecord.check_interval_seconds}s, '
                 f'notifying {self.config.autorecord.notify_before_minutes}min before start'
             )
 
     def run(self, **options):
         self._recovery_timer.start()
-        if self._autorecord_timer is not None:
-            self._autorecord_timer.start()
-            self._autorecord_kickoff_timer.start()
+        if self._calendar_poll_timer is not None:
+            self._calendar_poll_timer.start()
+            self._meeting_check_timer.start()
+            self._calendar_poll_kickoff_timer.start()
         super().run(**options)
 
-    def _run_autorecord_kickoff(self, sender):
+    def _run_calendar_poll_kickoff(self, sender):
         # rumps.Timer only fires for the first time after a full interval, so an
-        # in-progress meeting would wait up to poll_interval_minutes after app
-        # start. Run one immediate poll so restarting mid-meeting records right away.
+        # in-progress meeting would wait up to calendar_poll_interval_minutes after app
+        # start. Run one immediate poll+check so restarting mid-meeting records right away.
         logger.debug('Running immediate meeting-prompt poll on startup')
         sender.stop()
-        self._run_autorecord_poll(sender)
+        self._run_calendar_poll(sender)
+        self._run_meeting_check(sender)
 
     def _load_config_safe(self):
         try:
@@ -88,12 +96,12 @@ class MenubarApp(rumps.App):
             return False
         return True
 
-    def _build_autorecord_timer(self):
+    def _build_calendar_poll_timer(self):
         if not self._autorecord_active():
             return None
 
-        interval = self.config.autorecord.poll_interval_minutes * 60
-        return rumps.Timer(self._run_autorecord_poll, interval)
+        interval = self.config.autorecord.calendar_poll_interval_minutes * 60
+        return rumps.Timer(self._run_calendar_poll, interval)
 
     def _run_recovery_scan(self, sender):
         sender.stop()
@@ -133,9 +141,9 @@ class MenubarApp(rumps.App):
 
     def _autorecord_window_minutes(self):
         autorecord = self.config.autorecord
-        return autorecord.notify_before_minutes + autorecord.poll_interval_minutes
+        return autorecord.notify_before_minutes + autorecord.calendar_poll_interval_minutes
 
-    def _run_autorecord_poll(self, sender):
+    def _run_calendar_poll(self, sender):
         window_minutes = self._autorecord_window_minutes()
         logger.debug(f'Polling calendar for events within {window_minutes}min')
 
@@ -146,10 +154,12 @@ class MenubarApp(rumps.App):
             return
 
         self._poll_failures = 0
-        now = datetime.now().astimezone()
         logger.debug(f'Poll returned {len(events)} event(s): {[e.title for e in events]}')
+        self._cached_events = events
 
-        for event in events:
+    def _run_meeting_check(self, sender):
+        now = datetime.now().astimezone()
+        for event in self._cached_events:
             self._maybe_notify_upcoming(event, now)
             self._maybe_prompt_start(event, now)
 
@@ -186,6 +196,11 @@ class MenubarApp(rumps.App):
             return
         if event.start_dt > now:
             logger.debug(f'"{event.title}": has not started yet ({event.start_dt} > {now}), skipping')
+            return
+
+        age_minutes = (now - event.start_dt).total_seconds() / 60
+        if age_minutes > self.config.autorecord.max_meeting_age_minutes:
+            logger.debug(f'"{event.title}": started {age_minutes:.1f}min ago, older than max_meeting_age_minutes, skipping')
             return
 
         self._prompted_events.add(event.id)

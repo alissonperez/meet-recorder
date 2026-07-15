@@ -83,8 +83,10 @@ ignored_event_slugs:
 calendar_match_before_minutes: 45
 autorecord:
   enabled: true
-  poll_interval_minutes: 3
+  calendar_poll_interval_minutes: 3
   notify_before_minutes: 10
+  check_interval_seconds: 15
+  max_meeting_age_minutes: 30
 ''')
 
     config = load_config(str(config_path))
@@ -94,8 +96,44 @@ autorecord:
     assert config.ignored_event_slugs == ['lunch', 'lunch-afternoon']
     assert config.calendar_match_before_minutes == 45
     assert config.autorecord.enabled is True
-    assert config.autorecord.poll_interval_minutes == 3
+    assert config.autorecord.calendar_poll_interval_minutes == 3
     assert config.autorecord.notify_before_minutes == 10
+    assert config.autorecord.check_interval_seconds == 15
+    assert config.autorecord.max_meeting_age_minutes == 30
+
+
+def test_autorecord_check_and_max_age_defaults(tmp_path):
+    config_path = tmp_path / 'config.yaml'
+    config_path.write_text(VALID_CONFIG + '''
+calendars:
+  - name: personal
+autorecord:
+  enabled: true
+''')
+
+    config = load_config(str(config_path))
+
+    assert config.autorecord.check_interval_seconds == 60
+    assert config.autorecord.max_meeting_age_minutes == 20
+
+
+def test_autorecord_enforces_minimum_bounds(tmp_path):
+    config_path = tmp_path / 'config.yaml'
+    config_path.write_text(VALID_CONFIG + '''
+calendars:
+  - name: personal
+autorecord:
+  enabled: true
+  calendar_poll_interval_minutes: 0
+  check_interval_seconds: -5
+  max_meeting_age_minutes: -1
+''')
+
+    config = load_config(str(config_path))
+
+    assert config.autorecord.calendar_poll_interval_minutes == 1
+    assert config.autorecord.check_interval_seconds == 1
+    assert config.autorecord.max_meeting_age_minutes == 0
 
 
 def test_credential_and_token_paths(monkeypatch, tmp_path):
