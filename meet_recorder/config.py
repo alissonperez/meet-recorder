@@ -13,8 +13,10 @@ DEFAULT_MATCH_BEFORE_MINUTES = 60
 DEFAULT_MATCH_AFTER_MINUTES = 15
 DEFAULT_MAX_ATTENDEES = 20
 
-DEFAULT_AUTORECORD_POLL_INTERVAL_MINUTES = 5
+DEFAULT_AUTORECORD_CALENDAR_POLL_INTERVAL_MINUTES = 5
 DEFAULT_AUTORECORD_NOTIFY_BEFORE_MINUTES = 5
+DEFAULT_AUTORECORD_CHECK_INTERVAL_SECONDS = 60
+DEFAULT_AUTORECORD_MAX_MEETING_AGE_MINUTES = 20
 
 REQUIRED_FIELDS = (
     'transcription_model',
@@ -36,11 +38,17 @@ class AutoRecordConfig:
     def __init__(self, data):
         data = data or {}
         self.enabled = bool(data.get('enabled', False))
-        self.poll_interval_minutes = int(
-            data.get('poll_interval_minutes', DEFAULT_AUTORECORD_POLL_INTERVAL_MINUTES)
+        self.calendar_poll_interval_minutes = int(
+            data.get('calendar_poll_interval_minutes', DEFAULT_AUTORECORD_CALENDAR_POLL_INTERVAL_MINUTES)
         )
         self.notify_before_minutes = int(
             data.get('notify_before_minutes', DEFAULT_AUTORECORD_NOTIFY_BEFORE_MINUTES)
+        )
+        self.check_interval_seconds = int(
+            data.get('check_interval_seconds', DEFAULT_AUTORECORD_CHECK_INTERVAL_SECONDS)
+        )
+        self.max_meeting_age_minutes = int(
+            data.get('max_meeting_age_minutes', DEFAULT_AUTORECORD_MAX_MEETING_AGE_MINUTES)
         )
 
 
