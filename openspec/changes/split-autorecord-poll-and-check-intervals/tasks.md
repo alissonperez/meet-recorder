@@ -42,5 +42,5 @@
 
 ## 6. Pull request
 
-- [ ] 6.1 Push the branch and open a pull request for this change via `gh pr create`.
-- [ ] 6.2 Include `Closes #8` in the pull request body so merging it automatically closes GitHub issue #8.
+- [x] 6.1 Push the branch and open a pull request for this change via `gh pr create`.
+- [x] 6.2 Include `Closes #8` in the pull request body so merging it automatically closes GitHub issue #8.
