@@ -117,6 +117,25 @@ autorecord:
     assert config.autorecord.max_meeting_age_minutes == 20
 
 
+def test_autorecord_enforces_minimum_bounds(tmp_path):
+    config_path = tmp_path / 'config.yaml'
+    config_path.write_text(VALID_CONFIG + '''
+calendars:
+  - name: personal
+autorecord:
+  enabled: true
+  calendar_poll_interval_minutes: 0
+  check_interval_seconds: -5
+  max_meeting_age_minutes: -1
+''')
+
+    config = load_config(str(config_path))
+
+    assert config.autorecord.calendar_poll_interval_minutes == 1
+    assert config.autorecord.check_interval_seconds == 1
+    assert config.autorecord.max_meeting_age_minutes == 0
+
+
 def test_credential_and_token_paths(monkeypatch, tmp_path):
     monkeypatch.setenv('HOME', str(tmp_path))
     import importlib

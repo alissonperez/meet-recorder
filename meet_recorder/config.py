@@ -38,18 +38,18 @@ class AutoRecordConfig:
     def __init__(self, data):
         data = data or {}
         self.enabled = bool(data.get('enabled', False))
-        self.calendar_poll_interval_minutes = int(
+        self.calendar_poll_interval_minutes = max(1, int(
             data.get('calendar_poll_interval_minutes', DEFAULT_AUTORECORD_CALENDAR_POLL_INTERVAL_MINUTES)
-        )
+        ))
         self.notify_before_minutes = int(
             data.get('notify_before_minutes', DEFAULT_AUTORECORD_NOTIFY_BEFORE_MINUTES)
         )
-        self.check_interval_seconds = int(
+        self.check_interval_seconds = max(1, int(
             data.get('check_interval_seconds', DEFAULT_AUTORECORD_CHECK_INTERVAL_SECONDS)
-        )
-        self.max_meeting_age_minutes = int(
+        ))
+        self.max_meeting_age_minutes = max(0, int(
             data.get('max_meeting_age_minutes', DEFAULT_AUTORECORD_MAX_MEETING_AGE_MINUTES)
-        )
+        ))
 
 
 class Config:
