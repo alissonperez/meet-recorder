@@ -6,15 +6,23 @@ TBD - created by syncing change integrate-google-calendar. Update Purpose after 
 ## Requirements
 
 ### Requirement: Opt-in meeting-prompt scheduler
-The system SHALL run a background scheduler in the menu bar app that watches upcoming calendar events only when the meeting prompt is enabled in config and calendar is configured, and SHALL otherwise remain inactive. The scheduler SHALL never start, stop, or otherwise control recording on its own — any recording start SHALL only happen as a direct result of explicit user confirmation in the start-time modal (see below).
+The system SHALL run two independent background timers in the menu bar app, active only when the meeting prompt is enabled in config and calendar is configured, and SHALL otherwise remain inactive: a calendar-poll timer that fetches upcoming accepted events from Google Calendar on `autorecord.calendar_poll_interval_minutes`, and a meeting-check timer that evaluates the most recently fetched events (without querying Google Calendar) on the independent, finer-grained `autorecord.check_interval_seconds`. The scheduler SHALL never start, stop, or otherwise control recording on its own — any recording start SHALL only happen as a direct result of explicit user confirmation in the start-time modal (see below).
 
 #### Scenario: Meeting prompt enabled
 - **WHEN** the menu bar app runs with `autorecord.enabled` true and at least one calendar account configured
-- **THEN** a background timer periodically queries upcoming accepted events and drives the upcoming-meeting notification and the start-time confirmation modal
+- **THEN** the calendar-poll timer periodically queries upcoming accepted events and the meeting-check timer periodically evaluates those events to drive the upcoming-meeting notification and the start-time confirmation modal
 
 #### Scenario: Meeting prompt disabled or calendar unconfigured
 - **WHEN** the meeting prompt is disabled or no calendar is configured
-- **THEN** the scheduler performs no calendar queries and the menu bar app behaves exactly as it did before this change
+- **THEN** neither timer runs, no calendar queries happen, and the menu bar app behaves exactly as it did before this change
+
+#### Scenario: Meeting-check runs independently of calendar polling
+- **WHEN** `autorecord.check_interval_seconds` is configured to a value shorter than `autorecord.calendar_poll_interval_minutes` converted to seconds
+- **THEN** the meeting-check timer fires at its own configured cadence, evaluating the events fetched by the most recent calendar poll, without triggering an additional Google Calendar request
+
+#### Scenario: App starts mid-meeting
+- **WHEN** the menu bar app starts while an accepted, non-ignored event's start time has already passed (and it is not older than `autorecord.max_meeting_age_minutes`)
+- **THEN** an initial calendar fetch and an initial meeting-check both run immediately on startup, so the start-time modal is not delayed by a full `check_interval_seconds` or `calendar_poll_interval_minutes` wait
 
 ### Requirement: Upcoming-meeting notification
 The system SHALL show a notification announcing an upcoming accepted meeting when its start time is within the configured lead time, at most once per event.
@@ -24,7 +32,7 @@ The system SHALL show a notification announcing an upcoming accepted meeting whe
 - **THEN** a notification naming the meeting and its start time is shown once for that event
 
 ### Requirement: Meeting-start confirmation modal
-The system SHALL show a modal dialog (not a passive notification) when an accepted, non-ignored event's start time arrives, stating the meeting's title and start time, and offering the user a choice to start recording or dismiss. The system SHALL start a recording if and only if the user confirms in that dialog.
+The system SHALL show a modal dialog (not a passive notification) when an accepted, non-ignored event's start time has arrived and is no older than `autorecord.max_meeting_age_minutes`, stating the meeting's title and start time, and offering the user a choice to start recording or dismiss. The system SHALL start a recording if and only if the user confirms in that dialog.
 
 #### Scenario: User confirms the modal
 - **WHEN** an accepted, non-ignored event's start time has arrived and the user confirms the modal (chooses to start recording)
@@ -45,6 +53,10 @@ The system SHALL show a modal dialog (not a passive notification) when an accept
 #### Scenario: Modal shown once per event
 - **WHEN** an event's start-time modal has already been shown (confirmed or dismissed)
 - **THEN** the app does not show the modal again for that same event
+
+#### Scenario: Meeting started too long ago
+- **WHEN** an accepted, non-ignored event's start time is more than `autorecord.max_meeting_age_minutes` in the past (e.g. the app was just launched, or woke from sleep, long after the meeting began)
+- **THEN** the app does not show the start-time modal for that event, and does not mark the event as having been prompted
 
 ### Requirement: Scheduler resilience
 The system SHALL keep the scheduler running across transient calendar failures, logging and retrying on the next poll rather than terminating the timer.
