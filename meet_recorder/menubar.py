@@ -198,7 +198,12 @@ class MenubarApp(rumps.App):
             logger.debug(f'"{event.title}": has not started yet ({event.start_dt} > {now}), skipping')
             return
 
-        age_minutes = (now - event.start_dt).total_seconds() / 60
+        age_seconds = (now - event.start_dt).total_seconds()
+        if age_seconds < self.config.autorecord.prompt_delay_seconds:
+            logger.debug(f'"{event.title}": started {age_seconds:.0f}s ago, waiting for prompt_delay_seconds, skipping')
+            return
+
+        age_minutes = age_seconds / 60
         if age_minutes > self.config.autorecord.max_meeting_age_minutes:
             logger.debug(f'"{event.title}": started {age_minutes:.1f}min ago, older than max_meeting_age_minutes, skipping')
             return

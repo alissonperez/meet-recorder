@@ -280,6 +280,7 @@ autorecord:
   enabled: true
   calendar_poll_interval_minutes: 5   # how often the menu bar app polls Google Calendar
   check_interval_seconds: 60          # how often it re-checks fetched events to notify/prompt
+  prompt_delay_seconds: 0             # wait this long after the start time before showing the start modal
   notify_before_minutes: 5            # lead time for the "next meeting" notification
   max_meeting_age_minutes: 20         # don't show the start modal for a meeting older than this
 ```

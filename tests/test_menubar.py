@@ -14,6 +14,7 @@ class _StubAutorecordConfig:
         self.notify_before_minutes = 5
         self.check_interval_seconds = 60
         self.max_meeting_age_minutes = 20
+        self.prompt_delay_seconds = 0
         for key, value in kwargs.items():
             setattr(self, key, value)
 
@@ -55,8 +56,9 @@ def app_with_calendar(monkeypatch):
     return instance
 
 
-def _event(event_id='evt-1', title='Standup', minutes_from_now=0):
-    start = datetime.now().astimezone() + timedelta(minutes=minutes_from_now)
+def _event(event_id='evt-1', title='Standup', minutes_from_now=0, seconds_from_now=None):
+    delta = timedelta(seconds=seconds_from_now) if seconds_from_now is not None else timedelta(minutes=minutes_from_now)
+    start = datetime.now().astimezone() + delta
     return CalendarEvent(
         event_id=event_id, title=title, calendar='personal',
         start_dt=start, end_dt=start + timedelta(minutes=30),
@@ -148,6 +150,38 @@ def test_prompt_start_shows_when_within_max_age(app):
     app.config.autorecord.max_meeting_age_minutes = 20
     app._show_alert.return_value = 0
     event = _event(minutes_from_now=-10)
+
+    app._maybe_prompt_start(event, datetime.now().astimezone())
+
+    app._show_alert.assert_called_once()
+    assert event.id in app._prompted_events
+
+
+def test_prompt_start_skips_before_prompt_delay_elapses(app):
+    app.config.autorecord.prompt_delay_seconds = 60
+    event = _event(seconds_from_now=-10)
+
+    app._maybe_prompt_start(event, datetime.now().astimezone())
+
+    app._show_alert.assert_not_called()
+    assert event.id not in app._prompted_events
+
+
+def test_prompt_start_shows_after_prompt_delay_elapses(app):
+    app.config.autorecord.prompt_delay_seconds = 60
+    app._show_alert.return_value = 0
+    event = _event(seconds_from_now=-90)
+
+    app._maybe_prompt_start(event, datetime.now().astimezone())
+
+    app._show_alert.assert_called_once()
+    assert event.id in app._prompted_events
+
+
+def test_prompt_start_shows_immediately_when_prompt_delay_is_default(app):
+    assert app.config.autorecord.prompt_delay_seconds == 0
+    app._show_alert.return_value = 0
+    event = _event(seconds_from_now=-1)
 
     app._maybe_prompt_start(event, datetime.now().astimezone())
 

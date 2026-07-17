@@ -17,6 +17,7 @@ DEFAULT_AUTORECORD_CALENDAR_POLL_INTERVAL_MINUTES = 5
 DEFAULT_AUTORECORD_NOTIFY_BEFORE_MINUTES = 5
 DEFAULT_AUTORECORD_CHECK_INTERVAL_SECONDS = 60
 DEFAULT_AUTORECORD_MAX_MEETING_AGE_MINUTES = 20
+DEFAULT_AUTORECORD_PROMPT_DELAY_SECONDS = 0
 
 REQUIRED_FIELDS = (
     'transcription_model',
@@ -49,6 +50,9 @@ class AutoRecordConfig:
         ))
         self.max_meeting_age_minutes = max(0, int(
             data.get('max_meeting_age_minutes', DEFAULT_AUTORECORD_MAX_MEETING_AGE_MINUTES)
+        ))
+        self.prompt_delay_seconds = max(0, int(
+            data.get('prompt_delay_seconds', DEFAULT_AUTORECORD_PROMPT_DELAY_SECONDS)
         ))
 
 
