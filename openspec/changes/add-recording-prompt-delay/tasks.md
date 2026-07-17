@@ -33,4 +33,4 @@
 
 ## 6. Pull request
 
-- [ ] 6.1 Push the branch and open a pull request for this change via `gh pr create`.
+- [x] 6.1 Push the branch and open a pull request for this change via `gh pr create`.
