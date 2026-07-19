@@ -19,6 +19,7 @@ def _event(**overrides):
         start_raw='2024-03-15T10:00:00+00:00',
         end_raw='2024-03-15T11:00:00+00:00',
         attendees=['Alice', 'Bob'],
+        description=None,
     )
     base.update(overrides)
     return SimpleNamespace(**base)
@@ -112,6 +113,44 @@ def test_event_context_includes_title_and_attendees():
     assert 'Alice, Bob' in context
 
 
+def test_event_context_includes_description_when_present():
+    context = transcriber._event_context(_event(description='Agenda: revisar roadmap'))
+
+    assert 'Descrição: Agenda: revisar roadmap' in context
+
+
+def test_event_context_omits_description_when_absent():
+    context = transcriber._event_context(_event(description=None))
+
+    assert 'Descrição' not in context
+
+
+def test_event_context_strips_html_from_description():
+    description = '<b>Agenda:</b> revisar roadmap<br>Link: <a href="https://x.test">aqui</a>'
+    context = transcriber._event_context(_event(description=description))
+
+    assert '<' not in context
+    assert '>' not in context
+    assert 'Agenda: revisar roadmap' in context
+    assert 'Link: aqui' in context
+
+
+def test_event_context_truncates_long_description():
+    description = 'x' * 1000
+    context = transcriber._event_context(_event(description=description))
+
+    line = next(line for line in context.splitlines() if line.startswith('Descrição:'))
+    body = line.removeprefix('Descrição: ')
+
+    assert body == ('x' * transcriber.EVENT_DESCRIPTION_MAX_LENGTH) + '…'
+
+
+def test_event_context_omits_description_when_only_html():
+    context = transcriber._event_context(_event(description='<br><br>  '))
+
+    assert 'Descrição' not in context
+
+
 def test_generate_summary_prepends_event_context(monkeypatch):
     captured = {}
 
@@ -141,6 +180,66 @@ def test_generate_summary_without_event_passes_transcript_only(monkeypatch):
     assert captured['user_content'] == 'the transcript'
 
 
+def _chunk_config():
+    return Mock(
+        transcription_model='stt',
+        transcription_prompt='Transcreva o áudio.',
+        base_url='https://example.test/v1',
+    )
+
+
+def _stub_transcription_post(monkeypatch, captured):
+    monkeypatch.setenv('OPENROUTER_API_KEY', 'test-key')
+
+    def fake_post(url, json, headers, timeout):
+        captured['payload'] = json
+        return Mock(raise_for_status=lambda: None, json=lambda: {'text': 'chunk text'})
+
+    monkeypatch.setattr(transcriber.httpx, 'post', fake_post)
+
+
+def test_transcribe_chunk_prepends_event_context_to_prompt(monkeypatch, tmp_path):
+    chunk = tmp_path / 'chunk.mp3'
+    chunk.write_bytes(b'audio')
+    captured = {}
+    _stub_transcription_post(monkeypatch, captured)
+
+    text = transcriber._transcribe_chunk(str(chunk), _chunk_config(), _event(description='Agenda X'))
+
+    assert text == 'chunk text'
+    prompt = captured['payload']['prompt']
+    assert prompt.startswith('Título da reunião: Weekly Sync')
+    assert 'Descrição: Agenda X' in prompt
+    assert 'Alice, Bob' in prompt
+    assert prompt.endswith('Transcreva o áudio.')
+
+
+def test_transcribe_chunk_sends_prompt_as_is_without_event(monkeypatch, tmp_path):
+    chunk = tmp_path / 'chunk.mp3'
+    chunk.write_bytes(b'audio')
+    captured = {}
+    _stub_transcription_post(monkeypatch, captured)
+
+    transcriber._transcribe_chunk(str(chunk), _chunk_config())
+
+    assert captured['payload']['prompt'] == 'Transcreva o áudio.'
+
+
+def test_transcribe_audio_threads_event_to_each_chunk(monkeypatch):
+    received = []
+    monkeypatch.setattr(transcriber, '_split_into_chunks', lambda path, dur: ['c0', 'c1'])
+    monkeypatch.setattr(
+        transcriber, '_transcribe_chunk',
+        lambda chunk, config, event=None: received.append(event) or 'x',
+    )
+    config = Mock(chunk_duration=420)
+    event = _event()
+
+    transcriber._transcribe_audio('audio.mp3', config, event)
+
+    assert received == [event, event]
+
+
 def _transcribe_config(tmp_path):
     return Mock(
         transcript_dir=str(tmp_path / 'transcripts'),
@@ -152,7 +251,7 @@ def test_transcribe_uses_event_title_and_skips_llm(monkeypatch, tmp_path):
     work_dir = tmp_path / 'work'
     work_dir.mkdir()
     monkeypatch.setattr(transcriber, '_preprocess_audio', lambda p: str(work_dir / 'a.mp3'))
-    monkeypatch.setattr(transcriber, '_transcribe_audio', lambda m, c: 'transcript text')
+    monkeypatch.setattr(transcriber, '_transcribe_audio', lambda m, c, e=None: 'transcript text')
     monkeypatch.setattr(transcriber, '_generate_summary', lambda t, c, e=None: 'summary text')
 
     gen_title = Mock(return_value='LLM Title')
@@ -175,7 +274,7 @@ def test_transcribe_derives_filenames_and_month_folder_from_start_time_filename(
     work_dir = tmp_path / 'work'
     work_dir.mkdir()
     monkeypatch.setattr(transcriber, '_preprocess_audio', lambda p: str(work_dir / 'a.mp3'))
-    monkeypatch.setattr(transcriber, '_transcribe_audio', lambda m, c: 'transcript text')
+    monkeypatch.setattr(transcriber, '_transcribe_audio', lambda m, c, e=None: 'transcript text')
     monkeypatch.setattr(transcriber, '_generate_summary', lambda t, c, e=None: 'summary text')
     monkeypatch.setattr(transcriber, '_generate_title', Mock(return_value='LLM Title'))
     monkeypatch.setattr(transcriber.calendar, 'find_event', lambda ts, c: None)
@@ -203,7 +302,7 @@ def test_transcribe_falls_back_to_llm_title_without_event(monkeypatch, tmp_path)
     work_dir = tmp_path / 'work'
     work_dir.mkdir()
     monkeypatch.setattr(transcriber, '_preprocess_audio', lambda p: str(work_dir / 'a.mp3'))
-    monkeypatch.setattr(transcriber, '_transcribe_audio', lambda m, c: 'transcript text')
+    monkeypatch.setattr(transcriber, '_transcribe_audio', lambda m, c, e=None: 'transcript text')
     monkeypatch.setattr(transcriber, '_generate_summary', lambda t, c, e=None: 'summary text')
 
     gen_title = Mock(return_value='LLM Title')
