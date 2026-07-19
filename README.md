@@ -24,13 +24,17 @@ Markdown transcripts and LLM-generated summaries, optionally enriched with your 
   recording to the calendar event it belongs to (using the event's title and attendees in the
   output), and prompts you at a meeting's start time asking whether to record — recording never
   starts silently on its own. Read-only scope; supports multiple Google accounts.
+- **[Meet transcript ingestion](#meet-transcript-ingestion)** *(optional)* — for meetings Google
+  Meet transcribed itself, pulls the transcript and Gemini notes from the calendar event's
+  attachments and produces the same transcript + summary files without recording — on demand or on
+  a background poll.
 - **[Autostart at login](#autostart-at-login-launchd)** — a `launchd` LaunchAgent setup to keep
   the menu bar app running from login, with auto-relaunch if it exits.
 - **Crash recovery** — `python main.py recover` scans for orphaned in-progress recordings left
   behind by a crash and lets you process, ignore, or delete each one.
 - **CLI commands** for everything: `record` (fixed-duration recording), `menubar`, `transcribe`
-  (re-run the pipeline on any existing `.wav`), `calendar_auth`, and `recover` — see
-  `poetry run python main.py --help`.
+  (re-run the pipeline on any existing `.wav`), `meet_transcripts` (ingest Meet transcripts from
+  calendar events), `calendar_auth`, and `recover` — see `poetry run python main.py --help`.
 
 ## Requirements
 
@@ -202,7 +206,7 @@ same transcript/summary output files.
 
 ## Google Calendar (optional)
 
-meet-recorder can optionally connect to Google Calendar for two things:
+meet-recorder can optionally connect to Google Calendar for three things:
 
 - **Reactive enrichment** — when a recording is transcribed, it's matched to the calendar event
   it belongs to and the *event's* title is used for the output filenames and frontmatter instead
@@ -210,6 +214,9 @@ meet-recorder can optionally connect to Google Calendar for two things:
 - **Proactive meeting prompt** — the menu bar app watches your upcoming meetings, notifies you of
   the next one, and at its start time shows a dialog asking whether to start recording — recording
   never starts silently on its own.
+- **Meet transcript ingestion** — for meetings Google Meet transcribed itself, pull the transcript
+  (and Gemini notes) straight from the calendar event's attachments and produce the same
+  transcript + summary files, without recording. See [Meet transcript ingestion](#meet-transcript-ingestion).
 
 The whole feature is **opt-in**. With no `calendars:` list in `config.yaml`, the app behaves
 exactly as documented above: an LLM-generated title, no enrichment, and no calendar polling.
@@ -239,8 +246,14 @@ exactly as documented above: an LLM-generated title, no enrichment, and no calen
 
 Tokens live as files in the config dir (`~/.config/meet-recorder/tokens/{name}.json`, mode `0600`)
 and are **refreshed and re-saved automatically** when they expire. **No calendar secret ever goes
-in `.env`** — `.env` only holds `OPENROUTER_API_KEY`. The requested scope is read-only
-(`calendar.readonly`); meet-recorder never modifies your calendar.
+in `.env`** — `.env` only holds `OPENROUTER_API_KEY`. The requested scopes are read-only
+(`calendar.readonly` and `drive.readonly`); meet-recorder never modifies your calendar or Drive.
+
+> **Re-authorization required for Drive access.** Drive read access (`drive.readonly`) was added
+> for [Meet transcript ingestion](#meet-transcript-ingestion). Tokens authorized before that scope
+> existed keep working for calendar features but **cannot export Drive docs** — re-run
+> `calendar_auth --account {name}` once per account to grant it. Until then, transcript ingestion
+> fails non-fatally with a message telling you to re-authorize.
 
 ### Reactive enrichment
 
@@ -304,6 +317,63 @@ Notes:
 - The dialog is shown once per event; dismissing it (or ignoring it) means it won't reappear for
   that meeting.
 - Persistent calendar/auth failures are surfaced via a notification so login-start users notice.
+
+### Meet transcript ingestion
+
+When Google Meet transcribes a meeting itself (a **Google Workspace** feature), it attaches the
+transcript — and often an "Anotações do Gemini" notes doc — to the calendar event afterward as
+Google Docs. This flow pulls those Docs from past events and produces the same transcript + summary
+Markdown files the recording pipeline does, so meetings you **didn't record** still get output. It
+complements recording; it never replaces it.
+
+**Prerequisites:**
+
+- The meeting must have been transcribed by Google Meet (a Workspace feature — personal Gmail
+  accounts don't transcribe).
+- Each account's token must include `drive.readonly` — re-run `calendar_auth --account {name}`
+  after upgrading (see the re-authorization note under [Setup](#setup)).
+
+Run it once on demand over the look-back window:
+
+```
+$ poetry run python main.py meet_transcripts
+```
+
+Or enable the background poller in the menu bar app under `meet_transcripts` in `config.yaml`:
+
+```yaml
+meet_transcripts:
+  enabled: true
+  poll_interval_minutes: 15   # how often the menu bar app polls for newly-ended meetings
+  lookback_hours: 12          # ingest meetings that ended within this window (clamped to 48h)
+  max_access_retries: 3       # per-file access retries before giving up (throttled to hourly)
+
+# Optional. Unlike summary_prompt, this MAY attribute speech to people, since Meet transcripts
+# carry speaker names. A sensible default is used when omitted.
+meet_summary_prompt: |
+  Você é um assistente que resume transcrições de reuniões em português.
+  A transcrição a seguir foi gerada pelo Google Meet e identifica quem fala.
+  ...
+```
+
+How it works and its limits:
+
+- Each eligible past occurrence's Doc attachments are exported to Markdown via the Drive API and
+  written with the event title as the title and the occurrence start time as the timestamp. Output
+  reuses the existing per-month folders and frontmatter.
+- A meeting with Gemini notes but no transcript still produces output, using the notes as the body.
+- **Overwrite by design:** if both this flow and a recording produce output for the same meeting,
+  the Meet-sourced files win (they carry speaker attribution).
+- **Recurring-event accumulation:** a recurring occurrence surfaces transcript attachments from
+  *all* past occurrences (even under former event names). A transcript is bound to an occurrence
+  only when the date in its title matches that occurrence's start date; same-date segments
+  (`Transcript`, `Transcript 2`, …) are concatenated in order.
+- **Gemini-notes binding is best-effort:** the notes carry no date, so when an event has more than
+  one Gemini notes doc they are skipped (with a warning) rather than risk attaching the wrong one.
+- A persistent, self-rotating dedup ledger (`~/.config/meet-recorder/processed_meet.json`) keeps a
+  processed or abandoned meeting from being reprocessed. A transcript that isn't attached yet is
+  simply retried on the next poll; a doc that's attached but unreadable (not shared with you) is
+  retried at most hourly, then abandoned — the menu bar app shows a one-time modal the first time.
 
 ## Autostart at login (launchd)
 

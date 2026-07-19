@@ -4,7 +4,8 @@ import time
 
 from icecream import ic
 
-from meet_recorder import calendar, consolecolor as ccolor, menubar, recorder, transcriber
+from meet_recorder import calendar, consolecolor as ccolor, drive, meet_ingest, menubar, recorder, transcriber
+from meet_recorder.config import load_config
 from meet_recorder.tools import handler
 
 
@@ -57,6 +58,29 @@ def handler_calendar_auth(account):
     token_path = calendar.run_auth_flow(account)
 
     logger.info(f'Calendar token for {ccolor.green(account)} saved to {ccolor.green(token_path)}')
+
+
+@handler
+async def handler_meet_transcripts():
+    '''Ingest Google Meet transcripts + Gemini notes from past calendar events into transcript + summary files'''
+
+    ic('ingesting meet transcripts')
+
+    config = load_config()
+
+    try:
+        results = meet_ingest.ingest_once(config)
+    except drive.DriveScopeError as e:
+        logger.error(str(e))
+        return
+
+    if not results:
+        logger.info('Nothing to ingest')
+        return
+
+    for result in results:
+        logger.info(f'Transcript saved to {ccolor.green(result["transcript_path"])}')
+        logger.info(f'Summary saved to {ccolor.green(result["summary_path"])}')
 
 
 @handler

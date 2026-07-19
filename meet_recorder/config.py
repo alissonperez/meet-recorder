@@ -19,6 +19,23 @@ DEFAULT_AUTORECORD_CHECK_INTERVAL_SECONDS = 60
 DEFAULT_AUTORECORD_MAX_MEETING_AGE_MINUTES = 20
 DEFAULT_AUTORECORD_PROMPT_DELAY_SECONDS = 0
 
+DEFAULT_MEET_POLL_INTERVAL_MINUTES = 15
+DEFAULT_MEET_LOOKBACK_HOURS = 12
+DEFAULT_MEET_MAX_ACCESS_RETRIES = 3
+# Bounds keep a processed occurrence inside the dedup ledger's 2-day retention window:
+# the look-back cannot exceed it, and the total access-retry span (retries x 1h) stays
+# well under it (see ledger.LEDGER_RETENTION_DAYS / ACCESS_RETRY_INTERVAL_HOURS).
+MAX_MEET_LOOKBACK_HOURS = 48
+MAX_MEET_ACCESS_RETRIES = 24
+
+DEFAULT_MEET_SUMMARY_PROMPT = (
+    'Você é um assistente que resume transcrições de reuniões em português.\n'
+    'A transcrição a seguir foi gerada pelo Google Meet e identifica quem fala.\n'
+    'Gere um resumo em Markdown com as seções: "Resumo executivo",\n'
+    '"Principais tópicos discutidos" e "Decisões tomadas".\n'
+    'Você pode atribuir falas e decisões às pessoas quando a transcrição as identificar.'
+)
+
 REQUIRED_FIELDS = (
     'transcription_model',
     'summary_model',
@@ -56,6 +73,21 @@ class AutoRecordConfig:
         ))
 
 
+class MeetTranscriptsConfig:
+    def __init__(self, data):
+        data = data or {}
+        self.enabled = bool(data.get('enabled', False))
+        self.poll_interval_minutes = max(1, int(
+            data.get('poll_interval_minutes', DEFAULT_MEET_POLL_INTERVAL_MINUTES)
+        ))
+        self.lookback_hours = min(MAX_MEET_LOOKBACK_HOURS, max(1, int(
+            data.get('lookback_hours', DEFAULT_MEET_LOOKBACK_HOURS)
+        )))
+        self.max_access_retries = min(MAX_MEET_ACCESS_RETRIES, max(1, int(
+            data.get('max_access_retries', DEFAULT_MEET_MAX_ACCESS_RETRIES)
+        )))
+
+
 class Config:
     def __init__(self, data):
         self.transcription_model = data['transcription_model']
@@ -80,6 +112,8 @@ class Config:
         self.ignored_event_slugs = [slugify(i) for i in list(data.get('ignored_event_slugs') or [])]
         self.max_attendees = int(data.get('calendar_max_attendees', DEFAULT_MAX_ATTENDEES))
         self.autorecord = AutoRecordConfig(data.get('autorecord'))
+        self.meet_transcripts = MeetTranscriptsConfig(data.get('meet_transcripts'))
+        self.meet_summary_prompt = data.get('meet_summary_prompt', DEFAULT_MEET_SUMMARY_PROMPT)
 
     @property
     def calendar_enabled(self):

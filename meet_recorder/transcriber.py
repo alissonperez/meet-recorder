@@ -167,12 +167,20 @@ def _event_context(event):
     return '\n'.join(lines) + '\n\n'
 
 
-def _generate_summary(transcript_text, config, event=None):
-    user_content = transcript_text
-    if event is not None:
-        user_content = _event_context(event) + transcript_text
+def _gemini_context(gemini_text):
+    return f'Notas do Gemini (contexto adicional):\n{gemini_text}\n\n'
 
-    return _chat_completion(config.summary_model, config.summary_prompt, user_content, config)
+
+def _generate_summary(transcript_text, config, event=None, summary_prompt=None, gemini_context=None):
+    prompt = summary_prompt if summary_prompt is not None else config.summary_prompt
+
+    user_content = transcript_text
+    if gemini_context:
+        user_content = _gemini_context(gemini_context) + user_content
+    if event is not None:
+        user_content = _event_context(event) + user_content
+
+    return _chat_completion(config.summary_model, prompt, user_content, config)
 
 
 def _resolve_timestamp(wav_path):
@@ -267,3 +275,29 @@ async def transcribe(wav_path, config=None):
     finally:
         if tmp_dir and os.path.isdir(tmp_dir):
             shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def write_meet_output(event, transcript_text, config, gemini_context=None):
+    '''Write transcript + summary files from ready (Meet-sourced) transcript text.
+
+    Reuses the recording pipeline's summary/output layer: the summary is generated with the
+    speaker-aware `meet_summary_prompt` (fed the Gemini notes as extra context when present),
+    the title is the calendar event title, and the timestamp is the occurrence start time.
+    Existing files at the target paths are overwritten by design.'''
+    summary_text = _generate_summary(
+        transcript_text, config, event=event,
+        summary_prompt=config.meet_summary_prompt, gemini_context=gemini_context,
+    )
+    title = event.title
+    timestamp = event.start_dt
+
+    transcript_path = _write_markdown(
+        config.transcript_dir, timestamp, _build_base_filename(timestamp, title),
+        _transcript_markdown(title, transcript_text, event),
+    )
+    summary_path = _write_markdown(
+        config.summary_dir, timestamp, _build_base_filename(timestamp, title, suffix='RESUMO'),
+        _summary_markdown(title, summary_text, event),
+    )
+
+    return {'transcript_path': transcript_path, 'summary_path': summary_path}

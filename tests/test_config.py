@@ -154,6 +154,57 @@ autorecord:
     assert config.autorecord.prompt_delay_seconds == 0
 
 
+def test_meet_transcripts_absent_is_disabled(tmp_path):
+    config_path = tmp_path / 'config.yaml'
+    config_path.write_text(VALID_CONFIG)
+
+    config = load_config(str(config_path))
+
+    assert config.meet_transcripts.enabled is False
+    assert config.meet_transcripts.poll_interval_minutes == 15
+    assert config.meet_transcripts.lookback_hours == 12
+    assert config.meet_transcripts.max_access_retries == 3
+    # A usable default prompt is always available.
+    assert isinstance(config.meet_summary_prompt, str) and config.meet_summary_prompt
+
+
+def test_meet_transcripts_section_parsed(tmp_path):
+    config_path = tmp_path / 'config.yaml'
+    config_path.write_text(VALID_CONFIG + '''
+meet_transcripts:
+  enabled: true
+  poll_interval_minutes: 20
+  lookback_hours: 6
+  max_access_retries: 5
+meet_summary_prompt: custom meet prompt
+''')
+
+    config = load_config(str(config_path))
+
+    assert config.meet_transcripts.enabled is True
+    assert config.meet_transcripts.poll_interval_minutes == 20
+    assert config.meet_transcripts.lookback_hours == 6
+    assert config.meet_transcripts.max_access_retries == 5
+    assert config.meet_summary_prompt == 'custom meet prompt'
+
+
+def test_meet_transcripts_clamps_bounds(tmp_path):
+    config_path = tmp_path / 'config.yaml'
+    config_path.write_text(VALID_CONFIG + '''
+meet_transcripts:
+  enabled: true
+  poll_interval_minutes: 0
+  lookback_hours: 200
+  max_access_retries: 1000
+''')
+
+    config = load_config(str(config_path))
+
+    assert config.meet_transcripts.poll_interval_minutes == 1
+    assert config.meet_transcripts.lookback_hours == 48
+    assert config.meet_transcripts.max_access_retries == 24
+
+
 def test_credential_and_token_paths(monkeypatch, tmp_path):
     monkeypatch.setenv('HOME', str(tmp_path))
     import importlib

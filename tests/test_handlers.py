@@ -84,6 +84,40 @@ def test_delete_choice_deletes_and_skips_transcription(monkeypatch):
     transcribe_mock.assert_not_awaited()
 
 
+def test_handler_meet_transcripts_logs_written_files(monkeypatch):
+    monkeypatch.setattr(handlers, 'load_config', Mock(return_value=Mock()))
+    ingest_mock = Mock(return_value=[{'transcript_path': 't.md', 'summary_path': 's.md'}])
+    monkeypatch.setattr(handlers.meet_ingest, 'ingest_once', ingest_mock)
+
+    handlers.handler_meet_transcripts()
+
+    ingest_mock.assert_called_once()
+    logged = ' '.join(str(c) for c in handlers.logger.info.call_args_list)
+    assert 't.md' in logged
+    assert 's.md' in logged
+
+
+def test_handler_meet_transcripts_reports_nothing_to_ingest(monkeypatch):
+    monkeypatch.setattr(handlers, 'load_config', Mock(return_value=Mock()))
+    monkeypatch.setattr(handlers.meet_ingest, 'ingest_once', Mock(return_value=[]))
+
+    handlers.handler_meet_transcripts()
+
+    handlers.logger.info.assert_called_with('Nothing to ingest')
+
+
+def test_handler_meet_transcripts_handles_scope_error(monkeypatch):
+    monkeypatch.setattr(handlers, 'load_config', Mock(return_value=Mock()))
+    monkeypatch.setattr(
+        handlers.meet_ingest, 'ingest_once',
+        Mock(side_effect=handlers.drive.DriveScopeError('re-auth needed')),
+    )
+
+    handlers.handler_meet_transcripts()
+
+    handlers.logger.error.assert_called_once()
+
+
 def test_ignore_choice_leaves_orphans_untouched(monkeypatch):
     orphans = ['/recordings/.in-progress/orphan1']
     monkeypatch.setattr(handlers.recorder, 'list_orphan_candidates', Mock(return_value=orphans))
