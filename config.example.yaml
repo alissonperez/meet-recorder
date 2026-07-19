@@ -76,5 +76,6 @@ base_url: https://openrouter.ai/api/v1
 #   enabled: false
 #   calendar_poll_interval_minutes: 5
 #   check_interval_seconds: 60
+#   prompt_delay_seconds: 0
 #   notify_before_minutes: 5
 #   max_meeting_age_minutes: 20

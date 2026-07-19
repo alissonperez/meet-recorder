@@ -115,6 +115,22 @@ autorecord:
 
     assert config.autorecord.check_interval_seconds == 60
     assert config.autorecord.max_meeting_age_minutes == 20
+    assert config.autorecord.prompt_delay_seconds == 0
+
+
+def test_autorecord_prompt_delay_seconds_configured(tmp_path):
+    config_path = tmp_path / 'config.yaml'
+    config_path.write_text(VALID_CONFIG + '''
+calendars:
+  - name: personal
+autorecord:
+  enabled: true
+  prompt_delay_seconds: 60
+''')
+
+    config = load_config(str(config_path))
+
+    assert config.autorecord.prompt_delay_seconds == 60
 
 
 def test_autorecord_enforces_minimum_bounds(tmp_path):
@@ -127,6 +143,7 @@ autorecord:
   calendar_poll_interval_minutes: 0
   check_interval_seconds: -5
   max_meeting_age_minutes: -1
+  prompt_delay_seconds: -10
 ''')
 
     config = load_config(str(config_path))
@@ -134,6 +151,7 @@ autorecord:
     assert config.autorecord.calendar_poll_interval_minutes == 1
     assert config.autorecord.check_interval_seconds == 1
     assert config.autorecord.max_meeting_age_minutes == 0
+    assert config.autorecord.prompt_delay_seconds == 0
 
 
 def test_credential_and_token_paths(monkeypatch, tmp_path):

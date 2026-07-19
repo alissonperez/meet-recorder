@@ -32,7 +32,7 @@ The system SHALL show a notification announcing an upcoming accepted meeting whe
 - **THEN** a notification naming the meeting and its start time is shown once for that event
 
 ### Requirement: Meeting-start confirmation modal
-The system SHALL show a modal dialog (not a passive notification) when an accepted, non-ignored event's start time has arrived and is no older than `autorecord.max_meeting_age_minutes`, stating the meeting's title and start time, and offering the user a choice to start recording or dismiss. The system SHALL start a recording if and only if the user confirms in that dialog.
+The system SHALL show a modal dialog (not a passive notification) when an accepted, non-ignored event's start time has arrived at least `autorecord.prompt_delay_seconds` ago and is no older than `autorecord.max_meeting_age_minutes`, stating the meeting's title and start time, and offering the user a choice to start recording or dismiss. The system SHALL start a recording if and only if the user confirms in that dialog.
 
 #### Scenario: User confirms the modal
 - **WHEN** an accepted, non-ignored event's start time has arrived and the user confirms the modal (chooses to start recording)
@@ -57,6 +57,14 @@ The system SHALL show a modal dialog (not a passive notification) when an accept
 #### Scenario: Meeting started too long ago
 - **WHEN** an accepted, non-ignored event's start time is more than `autorecord.max_meeting_age_minutes` in the past (e.g. the app was just launched, or woke from sleep, long after the meeting began)
 - **THEN** the app does not show the start-time modal for that event, and does not mark the event as having been prompted
+
+#### Scenario: Meeting started but the prompt delay hasn't elapsed yet
+- **WHEN** an accepted, non-ignored event's start time has passed but less than `autorecord.prompt_delay_seconds` have elapsed since then
+- **THEN** the app does not show the start-time modal for that event, and does not mark the event as having been prompted, so it is re-evaluated on the next meeting-check tick
+
+#### Scenario: Prompt delay defaults to zero
+- **WHEN** `autorecord.prompt_delay_seconds` is not set in config
+- **THEN** the app shows the start-time modal as soon as the event's start time has arrived, identical to behavior before this setting existed
 
 ### Requirement: Scheduler resilience
 The system SHALL keep the scheduler running across transient calendar failures, logging and retrying on the next poll rather than terminating the timer.
