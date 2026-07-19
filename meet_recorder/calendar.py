@@ -22,7 +22,7 @@ class CalendarError(Exception):
 
 
 class CalendarEvent:
-    def __init__(self, event_id, title, calendar, start_dt, end_dt, start_raw, end_raw, attendees):
+    def __init__(self, event_id, title, calendar, start_dt, end_dt, start_raw, end_raw, attendees, description=None):
         self.id = event_id
         self.title = title
         self.calendar = calendar
@@ -31,6 +31,7 @@ class CalendarEvent:
         self.start_raw = start_raw
         self.end_raw = end_raw
         self.attendees = attendees
+        self.description = description
 
 
 # --- Credentials / token persistence ----------------------------------------
@@ -175,6 +176,7 @@ def _extract_event(event, account, max_attendees):
         start_raw=_raw_boundary(event.get('start', {})),
         end_raw=_raw_boundary(event.get('end', {})),
         attendees=_attendee_names(event, max_attendees),
+        description=event.get('description'),
     )
 
 

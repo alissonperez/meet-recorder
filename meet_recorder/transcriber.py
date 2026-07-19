@@ -94,7 +94,7 @@ def _split_into_chunks(mp3_path, chunk_duration):
     return chunks
 
 
-def _transcribe_chunk(chunk_path, config):
+def _transcribe_chunk(chunk_path, config, event=None):
     with open(chunk_path, 'rb') as f:
         audio_b64 = base64.b64encode(f.read()).decode('ascii')
 
@@ -104,8 +104,11 @@ def _transcribe_chunk(chunk_path, config):
         'language': 'pt',
     }
 
-    if config.transcription_prompt:
-        payload['prompt'] = config.transcription_prompt
+    prompt = config.transcription_prompt or ''
+    if event is not None:
+        prompt = _event_context(event) + prompt
+    if prompt:
+        payload['prompt'] = prompt
 
     url = f'{config.base_url.rstrip("/")}/audio/transcriptions'
     headers = {'Authorization': f'Bearer {_api_key()}', 'Content-Type': 'application/json'}
@@ -119,9 +122,9 @@ def _transcribe_chunk(chunk_path, config):
     return response.json().get('text', '')
 
 
-def _transcribe_audio(mp3_path, config):
+def _transcribe_audio(mp3_path, config, event=None):
     chunks = _split_into_chunks(mp3_path, config.chunk_duration)
-    texts = [_transcribe_chunk(chunk, config) for chunk in chunks]
+    texts = [_transcribe_chunk(chunk, config, event) for chunk in chunks]
 
     return '\n'.join(texts)
 
@@ -162,6 +165,9 @@ def _generate_title(summary_text, config):
 
 def _event_context(event):
     lines = [f'Título da reunião: {event.title}']
+    description = getattr(event, 'description', None)
+    if description:
+        lines.append(f'Descrição: {description}')
     if event.attendees:
         lines.append('Participantes: ' + ', '.join(event.attendees))
     return '\n'.join(lines) + '\n\n'
@@ -250,7 +256,7 @@ async def transcribe(wav_path, config=None):
         mp3_path = _preprocess_audio(wav_path)
         tmp_dir = os.path.dirname(mp3_path)
 
-        transcript_text = _transcribe_audio(mp3_path, config)
+        transcript_text = _transcribe_audio(mp3_path, config, event)
         summary_text = _generate_summary(transcript_text, config, event)
         title = event.title if event is not None else _generate_title(summary_text, config)
 
