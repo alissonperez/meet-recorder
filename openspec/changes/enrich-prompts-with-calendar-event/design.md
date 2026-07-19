@@ -64,6 +64,17 @@ Participantes: {attendees}
 ```
 This function is reused as-is for transcription — no second formatter.
 
+The description is cleaned before use: HTML tags are stripped via stdlib
+`html.parser.HTMLParser` (Google Calendar descriptions authored in the web
+UI's rich-text editor commonly contain `<a href>`/`<br>`/list markup), and
+the result is capped at `EVENT_DESCRIPTION_MAX_LENGTH` (500 characters,
+with a trailing `…`). `HTMLParser` was chosen over a regex tag-stripper
+because it's more robust against malformed/nested markup and decodes HTML
+entities (`&amp;` → `&`) for free via its default `convert_charrefs=True`.
+If cleaning leaves nothing (e.g. an HTML-only description), the
+`Descrição:` line is omitted entirely — same as an absent description. See
+the Risks/Trade-offs entry below for why the 500-char cap exists.
+
 **3. Thread event context into the STT prompt via the `prompt` hint field, not a separate API parameter.**
 The `/audio/transcriptions` endpoint (OpenAI-compatible) only accepts a
 single free-text `prompt` hint. `_transcribe_chunk`/`_transcribe_audio`
@@ -119,10 +130,18 @@ example (format: `title`, `calendar`, `event_start`, `event_end`,
   extra context, same non-goal-breaking risk profile as the existing
   summary enrichment.
 - **Very long event descriptions bloating the STT prompt.** A Google
-  Calendar description can be long (multi-paragraph agenda, pasted links).
-  → No truncation is introduced in this change; if this proves to be a
-  problem in practice, truncation can be added to `_event_context` later
-  without changing its call sites.
+  Calendar description can be long (multi-paragraph agenda, pasted links)
+  and can carry raw HTML markup from the web UI's rich-text editor.
+  OpenAI Whisper's `prompt` parameter has a documented ~224-token limit;
+  when exceeded, only the *tail* of the prompt is kept, which — given
+  `_event_context` puts the title first — could silently push the meeting
+  title itself out of the sent prompt, undermining the whole point of this
+  enrichment. → Addressed directly rather than deferred: `_event_context`
+  strips HTML tags (via `html.parser.HTMLParser`, not regex) and truncates
+  the description to `EVENT_DESCRIPTION_MAX_LENGTH` (500 characters) before
+  using it. This is a rough character-based budget, not an exact token
+  count — exact token-accurate truncation would need a tokenizer
+  dependency, judged disproportionate to the risk it mitigates.
 - **Docs drift again.** A hand-maintained `docs/prompts.md` can go stale
   the same way the prompts have been undocumented until now. → Mitigated
   only by convention: a contribution checklist item in `CLAUDE.md` calls

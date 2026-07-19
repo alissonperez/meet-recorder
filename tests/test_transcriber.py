@@ -125,6 +125,32 @@ def test_event_context_omits_description_when_absent():
     assert 'Descrição' not in context
 
 
+def test_event_context_strips_html_from_description():
+    description = '<b>Agenda:</b> revisar roadmap<br>Link: <a href="https://x.test">aqui</a>'
+    context = transcriber._event_context(_event(description=description))
+
+    assert '<' not in context
+    assert '>' not in context
+    assert 'Agenda: revisar roadmap' in context
+    assert 'Link: aqui' in context
+
+
+def test_event_context_truncates_long_description():
+    description = 'x' * 1000
+    context = transcriber._event_context(_event(description=description))
+
+    line = next(line for line in context.splitlines() if line.startswith('Descrição:'))
+    body = line.removeprefix('Descrição: ')
+
+    assert body == ('x' * transcriber.EVENT_DESCRIPTION_MAX_LENGTH) + '…'
+
+
+def test_event_context_omits_description_when_only_html():
+    context = transcriber._event_context(_event(description='<br><br>  '))
+
+    assert 'Descrição' not in context
+
+
 def test_generate_summary_prepends_event_context(monkeypatch):
     captured = {}
 

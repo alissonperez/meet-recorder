@@ -2,10 +2,12 @@ import base64
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import tempfile
 from datetime import datetime
+from html.parser import HTMLParser
 
 import httpx
 from openai import OpenAI
@@ -20,6 +22,7 @@ AUDIO_SAMPLE_RATE = 16000
 AUDIO_BITRATE = '32k'
 TITLE_MAX_LENGTH = 60
 TITLE_MAX_ATTEMPTS = 3
+EVENT_DESCRIPTION_MAX_LENGTH = 500
 FILENAME_TIMESTAMP_FORMAT = '%Y-%m-%d_%H-%M-%S'
 MONTH_FORMAT = '%Y-%m'
 
@@ -163,11 +166,39 @@ def _generate_title(summary_text, config):
     return title[:TITLE_MAX_LENGTH]
 
 
+class _HTMLTextExtractor(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self._chunks = []
+
+    def handle_data(self, data):
+        self._chunks.append(data)
+
+    def text(self):
+        return ''.join(self._chunks)
+
+
+def _strip_html(text):
+    parser = _HTMLTextExtractor()
+    parser.feed(text)
+    return parser.text()
+
+
+def _clean_event_description(description):
+    text = _strip_html(description)
+    text = re.sub(r'\n\s*\n+', '\n', text).strip()
+    if len(text) > EVENT_DESCRIPTION_MAX_LENGTH:
+        text = text[:EVENT_DESCRIPTION_MAX_LENGTH].rstrip() + '…'
+    return text
+
+
 def _event_context(event):
     lines = [f'Título da reunião: {event.title}']
     description = getattr(event, 'description', None)
     if description:
-        lines.append(f'Descrição: {description}')
+        cleaned = _clean_event_description(description)
+        if cleaned:
+            lines.append(f'Descrição: {cleaned}')
     if event.attendees:
         lines.append('Participantes: ' + ', '.join(event.attendees))
     return '\n'.join(lines) + '\n\n'

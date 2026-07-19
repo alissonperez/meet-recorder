@@ -35,7 +35,14 @@ Participantes: Alice Silva, Bob Santos
 
 - The **title** line is always present.
 - The **`Descrição:`** line is included only when the matched event has a
-  non-empty description (the Google Calendar event body).
+  non-empty description (the Google Calendar event body). Before use, the
+  description is **HTML-stripped** (Google Calendar descriptions authored
+  via the web UI's rich-text editor often contain `<a href>`/`<br>`/list
+  markup) and **truncated to 500 characters** (with a trailing `…`), to
+  keep the overall prompt within speech-to-text prompt-length limits (see
+  `_clean_event_description()` in `meet_recorder/transcriber.py`). If the
+  description is HTML-only (nothing left after stripping), the line is
+  omitted entirely, same as an absent description.
 - The **`Participantes:`** line is included only when the event has
   attendees (capped by `calendar_max_attendees`).
 
