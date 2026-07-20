@@ -284,6 +284,11 @@ def write_meet_output(event, transcript_text, config, gemini_context=None):
     speaker-aware `meet_summary_prompt` (fed the Gemini notes as extra context when present),
     the title is the calendar event title, and the timestamp is the occurrence start time.
     Existing files at the target paths are overwritten by design.'''
+    logger.info(
+        f'"{event.title}": generating Meet summary with {config.summary_model} '
+        f'({len(transcript_text)} transcript chars, '
+        f'gemini context: {"yes" if gemini_context else "no"})'
+    )
     summary_text = _generate_summary(
         transcript_text, config, event=event,
         summary_prompt=config.meet_summary_prompt, gemini_context=gemini_context,
@@ -295,9 +300,12 @@ def write_meet_output(event, transcript_text, config, gemini_context=None):
         config.transcript_dir, timestamp, _build_base_filename(timestamp, title),
         _transcript_markdown(title, transcript_text, event),
     )
+    logger.debug(f'"{event.title}": wrote Meet transcript -> {transcript_path}')
+
     summary_path = _write_markdown(
         config.summary_dir, timestamp, _build_base_filename(timestamp, title, suffix='RESUMO'),
         _summary_markdown(title, summary_text, event),
     )
+    logger.debug(f'"{event.title}": wrote Meet summary -> {summary_path}')
 
     return {'transcript_path': transcript_path, 'summary_path': summary_path}

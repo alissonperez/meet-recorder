@@ -16,20 +16,29 @@ def _process_occurrence(event, config):
         logger.debug(f'"{event.title}": no transcript/notes attached yet, leaving unrecorded')
         return None
 
+    logger.info(
+        f'"{event.title}": processing occurrence '
+        f'({len(attachments.transcript_ids)} transcript doc(s), '
+        f'gemini notes: {"yes" if attachments.gemini_id else "no"})'
+    )
+
     gemini_context = None
     if attachments.gemini_id:
+        logger.debug(f'"{event.title}": exporting Gemini notes doc {attachments.gemini_id}')
         gemini_context = drive.export_doc_markdown(event.calendar, attachments.gemini_id)
 
     if attachments.transcript_ids:
-        parts = [
-            drive.export_doc_markdown(event.calendar, doc_id)
-            for doc_id in attachments.transcript_ids
-        ]
+        parts = []
+        for doc_id in attachments.transcript_ids:
+            logger.debug(f'"{event.title}": exporting transcript doc {doc_id}')
+            parts.append(drive.export_doc_markdown(event.calendar, doc_id))
         transcript_text = '\n\n'.join(parts)
+        logger.debug(f'"{event.title}": transcript assembled ({len(transcript_text)} chars)')
     else:
         # Gemini-only occurrence: the notes become the transcript body (Decision 7); they are
         # not also passed as extra summary context since they already are the content.
-        transcript_text = gemini_context
+        transcript_text = gemini_context or ''
+        logger.debug(f'"{event.title}": no transcript docs, using Gemini notes as transcript body ({len(transcript_text)} chars)')
         gemini_context = None
 
     return transcriber.write_meet_output(
