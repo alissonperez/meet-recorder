@@ -327,7 +327,13 @@ def _parse_transcript_title(title):
 
 
 def classify_attachment(att):
-    '''Classify a raw attachment dict by its `fileUrl` `usp=` marker (language-independent).
+    '''Classify a raw attachment dict.
+
+    Transcripts are identified by their Google-generated title structure
+    (`... - YYYY/MM/DD HH:MM GMT±HH:MM - Transcript[ N]`), not by the undocumented
+    `usp=` URL marker. Gemini notes carry no such structure, so they stay keyed on the
+    `usp=meet_tnfm_calendar` marker; an unrecognised `meet_*` marker is logged as a
+    warning (a signal Google renamed it and this needs updating).
 
     Returns ('transcript', doc_id, title_date) / ('gemini', doc_id, None) / None.'''
     file_url = att.get('fileUrl') or ''
@@ -336,14 +342,18 @@ def classify_attachment(att):
     if not doc_id:
         return None
 
-    if 'usp=drive_web' in file_url:
-        title_date, index = _parse_transcript_title(title)
-        if index is not None:
-            return ('transcript', doc_id, title_date)
-        return None
+    title_date, index = _parse_transcript_title(title)
+    if index is not None:
+        return ('transcript', doc_id, title_date)
 
     if 'usp=meet_tnfm_calendar' in file_url:
         return ('gemini', doc_id, None)
+
+    if 'usp=meet_' in file_url:
+        logger.warning(
+            f'{title!r}: unrecognised Meet attachment marker in {file_url!r}; '
+            'Gemini-notes classification may need updating'
+        )
 
     return None
 

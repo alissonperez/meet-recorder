@@ -357,6 +357,29 @@ def test_classify_drive_web_without_transcript_suffix_is_none():
     assert calendar.classify_attachment(att) is None
 
 
+def test_classify_transcript_without_usp_marker():
+    # Title structure alone classifies a transcript, independent of the `usp=` marker.
+    att = _transcript_att('Weekly - 2026/07/15 16:32 GMT-03:00 - Transcript', usp='sharing')
+    kind, doc_id, title_date = calendar.classify_attachment(att)
+
+    assert kind == 'transcript'
+    assert doc_id == 'doc-t'
+    assert title_date == datetime(2026, 7, 15).date()
+
+
+def test_classify_unrecognised_meet_marker_warns(caplog):
+    # A `meet_*` marker we do not recognise is dropped but logged, so drift is visible.
+    att = {
+        'title': 'Anotações do Gemini',
+        'fileUrl': 'https://docs.google.com/document/d/g2/edit?usp=meet_something_new',
+    }
+
+    with caplog.at_level('WARNING'):
+        assert calendar.classify_attachment(att) is None
+
+    assert any('unrecognised Meet attachment marker' in r.message for r in caplog.records)
+
+
 # --- attachments_for_occurrence ---------------------------------------------
 
 def _occurrence(start, attachments, title='Recurring Sync'):
