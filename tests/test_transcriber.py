@@ -180,6 +180,75 @@ def test_generate_summary_without_event_passes_transcript_only(monkeypatch):
     assert captured['user_content'] == 'the transcript'
 
 
+def test_generate_summary_uses_override_prompt_and_gemini_context(monkeypatch):
+    captured = {}
+
+    def fake_chat(model, system_prompt, user_content, config):
+        captured['system_prompt'] = system_prompt
+        captured['user_content'] = user_content
+        return 'summary'
+
+    monkeypatch.setattr(transcriber, '_chat_completion', fake_chat)
+    config = Mock(summary_model='m', summary_prompt='default prompt')
+
+    transcriber._generate_summary(
+        'the transcript', config, _event(),
+        summary_prompt='meet prompt', gemini_context='gemini notes body',
+    )
+
+    assert captured['system_prompt'] == 'meet prompt'
+    assert 'gemini notes body' in captured['user_content']
+    assert captured['user_content'].startswith('Título da reunião: Weekly Sync')
+    assert 'the transcript' in captured['user_content']
+
+
+def _meet_config(tmp_path):
+    return Mock(
+        transcript_dir=str(tmp_path / 'transcripts'),
+        summary_dir=str(tmp_path / 'summaries'),
+        summary_model='m',
+        summary_prompt='default prompt',
+        meet_summary_prompt='meet prompt',
+    )
+
+
+def test_write_meet_output_writes_files_with_event_title_and_start_time(monkeypatch, tmp_path):
+    captured = {}
+    monkeypatch.setattr(
+        transcriber, '_chat_completion',
+        lambda model, sp, uc, cfg: captured.update(system_prompt=sp, user_content=uc) or 'summary text',
+    )
+    start = datetime(2026, 7, 15, 10, 0, 0).astimezone()
+    event = _event(title='Real Meeting', start_dt=start)
+
+    result = transcriber.write_meet_output(
+        event, 'transcript body', _meet_config(tmp_path), gemini_context='notes',
+    )
+
+    # Meet summary prompt + Gemini context flow into the summary call.
+    assert captured['system_prompt'] == 'meet prompt'
+    assert 'notes' in captured['user_content']
+
+    transcript = open(result['transcript_path']).read()
+    assert 'title: "Real Meeting"' in transcript
+    assert 'transcript body' in transcript
+    assert '2026-07' in result['transcript_path']
+    assert 'Real-Meeting' in os.path.basename(result['summary_path'])
+
+
+def test_write_meet_output_overwrites_existing_file(monkeypatch, tmp_path):
+    monkeypatch.setattr(transcriber, '_chat_completion', lambda model, sp, uc, cfg: 'summary')
+    start = datetime(2026, 7, 15, 10, 0, 0).astimezone()
+    event = _event(title='Real Meeting', start_dt=start)
+    config = _meet_config(tmp_path)
+
+    first = transcriber.write_meet_output(event, 'first body', config)
+    second = transcriber.write_meet_output(event, 'second body', config)
+
+    assert first['transcript_path'] == second['transcript_path']
+    assert 'second body' in open(second['transcript_path']).read()
+
+
 def _chunk_config():
     return Mock(
         transcription_model='stt',

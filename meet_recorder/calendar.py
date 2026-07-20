@@ -2,15 +2,22 @@ import json
 import logging
 import os
 import threading
+from collections import namedtuple
 from datetime import datetime, timedelta
 
 from slugify import slugify
 
 from meet_recorder import config as config_module
+from meet_recorder import drive
 
 logger = logging.getLogger(__name__)
 
-CALENDAR_SCOPES = ['https://www.googleapis.com/auth/calendar.readonly']
+CALENDAR_SCOPES = [
+    'https://www.googleapis.com/auth/calendar.readonly',
+    'https://www.googleapis.com/auth/drive.readonly',
+]
+
+OccurrenceAttachments = namedtuple('OccurrenceAttachments', ['transcript_ids', 'gemini_id'])
 
 # Serializes token file read/refresh/write: menubar transcription threads and the
 # main-thread autorecord poll can both hit the same token file concurrently.
@@ -22,7 +29,8 @@ class CalendarError(Exception):
 
 
 class CalendarEvent:
-    def __init__(self, event_id, title, calendar, start_dt, end_dt, start_raw, end_raw, attendees, description=None):
+    def __init__(self, event_id, title, calendar, start_dt, end_dt, start_raw, end_raw, attendees,
+                 description=None, attachments=None):
         self.id = event_id
         self.title = title
         self.calendar = calendar
@@ -32,6 +40,7 @@ class CalendarEvent:
         self.end_raw = end_raw
         self.attendees = attendees
         self.description = description
+        self.attachments = attachments or []
 
 
 # --- Credentials / token persistence ----------------------------------------
@@ -177,6 +186,7 @@ def _extract_event(event, account, max_attendees):
         end_raw=_raw_boundary(event.get('end', {})),
         attendees=_attendee_names(event, max_attendees),
         description=event.get('description'),
+        attachments=list(event.get('attachments') or []),
     )
 
 
@@ -261,3 +271,130 @@ def upcoming_events(config, within_minutes):
 
     results.sort(key=lambda e: e.start_dt)
     return results
+
+
+def past_events(config, lookback_hours):
+    '''Return occurrences whose end time is within [now - lookback_hours, now], all accounts.
+
+    Applies the same decline/ignore filtering as elsewhere; a per-account query failure is
+    logged and skipped so other accounts still return. Sorted by start time.'''
+    now = datetime.now().astimezone()
+    time_min = now - timedelta(hours=lookback_hours)
+    logger.debug(f'Querying past events between {time_min} and {now} for accounts: {config.calendars}')
+
+    results = []
+    for account in config.calendars:
+        try:
+            raw_events = _query_events(account, time_min, now)
+        except Exception as e:
+            logger.warning(f'Past-events query failed for account "{account}": {e}')
+            continue
+
+        for event in _eligible_events(raw_events, config):
+            occurrence = _extract_event(event, account, config.max_attendees)
+            if occurrence.end_dt is not None and time_min <= occurrence.end_dt <= now:
+                results.append(occurrence)
+
+    results.sort(key=lambda e: e.start_dt)
+    return results
+
+
+# --- Attachment classification / occurrence binding -------------------------
+
+def _parse_transcript_title(title):
+    '''Parse `... - YYYY/MM/DD HH:MM GMT±HH:MM - Transcript[ N]` -> (date, index).
+
+    Returns (None, None) when the title is not a transcript title; the date is None (but
+    the index still set) when the embedded date cannot be parsed. No regex: split on the
+    trailing ` - ` markers and let datetime do the parsing.'''
+    left, sep, last = title.rpartition(' - ')
+    if not sep or not last.startswith('Transcript'):
+        return (None, None)
+
+    suffix = last[len('Transcript'):].strip()
+    if suffix == '':
+        index = 1
+    elif suffix.isdigit():
+        index = int(suffix)
+    else:
+        return (None, None)
+
+    date_part = left.rpartition(' - ')[2].strip().split(' ')[0]
+    try:
+        title_date = datetime.strptime(date_part, '%Y/%m/%d').date()
+    except ValueError:
+        title_date = None
+
+    return (title_date, index)
+
+
+def classify_attachment(att):
+    '''Classify a raw attachment dict.
+
+    Transcripts are identified by their Google-generated title structure
+    (`... - YYYY/MM/DD HH:MM GMT±HH:MM - Transcript[ N]`), not by the undocumented
+    `usp=` URL marker. Gemini notes carry no such structure, so they stay keyed on the
+    `usp=meet_tnfm_calendar` marker; an unrecognised `meet_*` marker is logged as a
+    warning (a signal Google renamed it and this needs updating).
+
+    Returns ('transcript', doc_id, title_date) / ('gemini', doc_id, None) / None.'''
+    file_url = att.get('fileUrl') or ''
+    title = att.get('title') or ''
+    doc_id = drive.doc_id_from_url(file_url) or att.get('fileId')
+    if not doc_id:
+        return None
+
+    title_date, index = _parse_transcript_title(title)
+    if index is not None:
+        return ('transcript', doc_id, title_date)
+
+    if 'usp=meet_tnfm_calendar' in file_url:
+        return ('gemini', doc_id, None)
+
+    if 'usp=meet_' in file_url:
+        logger.warning(
+            f'{title!r}: unrecognised Meet attachment marker in {file_url!r}; '
+            'Gemini-notes classification may need updating'
+        )
+
+    return None
+
+
+def attachments_for_occurrence(event):
+    '''Resolve the transcript + Gemini doc ids that belong to this occurrence.
+
+    Transcript docs are bound only when their title date matches the occurrence start
+    date (guarding against recurring events accumulating historical transcripts), merged
+    in trailing-index order. The single Gemini notes doc is included when exactly one is
+    present; more than one is skipped with a warning (they carry no date to disambiguate).'''
+    occurrence_date = event.start_dt.date() if event.start_dt else None
+
+    transcripts = []
+    gemini_ids = []
+    for att in (event.attachments or []):
+        classified = classify_attachment(att)
+        if classified is None:
+            logger.debug(f'"{event.title}": ignoring unclassified attachment {att.get("title")!r}')
+            continue
+
+        kind, doc_id, title_date = classified
+        if kind == 'transcript':
+            if occurrence_date is not None and title_date == occurrence_date:
+                _, index = _parse_transcript_title(att.get('title') or '')
+                transcripts.append((index or 1, doc_id))
+        elif kind == 'gemini':
+            gemini_ids.append(doc_id)
+
+    transcripts.sort(key=lambda t: t[0])
+    transcript_ids = [doc_id for _, doc_id in transcripts]
+
+    gemini_id = None
+    if len(gemini_ids) == 1:
+        gemini_id = gemini_ids[0]
+    elif len(gemini_ids) > 1:
+        logger.warning(
+            f'"{event.title}": {len(gemini_ids)} Gemini notes attachments; '
+            'skipping notes (cannot disambiguate without a date)'
+        )
+
+    return OccurrenceAttachments(transcript_ids, gemini_id)

@@ -303,6 +303,165 @@ def test_upcoming_events_propagates_errors(monkeypatch):
         calendar.upcoming_events(_config(), within_minutes=10)
 
 
+# --- past_events -------------------------------------------------------------
+
+def test_past_events_returns_only_ended_within_window(monkeypatch):
+    now = datetime.now().astimezone()
+    ended = _event('Ended', now - timedelta(hours=2), end=now - timedelta(hours=1), event_id='ended')
+    ongoing = _event('Ongoing', now - timedelta(minutes=30), end=now + timedelta(minutes=30), event_id='ongoing')
+    too_old = _event('TooOld', now - timedelta(hours=40), end=now - timedelta(hours=39), event_id='old')
+
+    monkeypatch.setattr(calendar, '_query_events', lambda a, mn, mx: [ended, ongoing, too_old])
+
+    events = calendar.past_events(_config(), lookback_hours=12)
+
+    assert [e.id for e in events] == ['ended']
+
+
+def test_past_events_sorted_and_skips_failing_account(monkeypatch):
+    now = datetime.now().astimezone()
+    a_event = _event('A', now - timedelta(hours=3), end=now - timedelta(hours=2, minutes=30), event_id='a')
+    b_event = _event('B', now - timedelta(hours=1), end=now - timedelta(minutes=45), event_id='b')
+
+    def fake_query(account, mn, mx):
+        if account == 'work':
+            raise RuntimeError('down')
+        return [b_event, a_event]
+
+    monkeypatch.setattr(calendar, '_query_events', fake_query)
+
+    events = calendar.past_events(_config(calendars=['personal', 'work']), lookback_hours=12)
+
+    assert [e.id for e in events] == ['a', 'b']
+
+
+# --- attachment classification ----------------------------------------------
+
+def _transcript_att(title, doc_id='doc-t', usp='drive_web'):
+    return {'title': title, 'fileUrl': f'https://docs.google.com/document/d/{doc_id}/edit?usp={usp}'}
+
+
+def _gemini_att(doc_id='doc-g'):
+    return {
+        'title': 'Anotações do Gemini',
+        'fileUrl': f'https://docs.google.com/document/d/{doc_id}/edit?usp=meet_tnfm_calendar',
+    }
+
+
+def test_classify_transcript_by_usp_marker():
+    att = _transcript_att('Weekly - 2026/07/15 16:32 GMT-03:00 - Transcript')
+    kind, doc_id, title_date = calendar.classify_attachment(att)
+
+    assert kind == 'transcript'
+    assert doc_id == 'doc-t'
+    assert title_date == datetime(2026, 7, 15).date()
+
+
+def test_classify_gemini_by_usp_marker_regardless_of_title():
+    kind, doc_id, title_date = calendar.classify_attachment(_gemini_att())
+
+    assert kind == 'gemini'
+    assert doc_id == 'doc-g'
+    assert title_date is None
+
+
+def test_classify_unrelated_attachment_is_none():
+    manual = {'title': 'Agenda', 'fileUrl': 'https://docs.google.com/document/d/x/edit?usp=sharing'}
+    assert calendar.classify_attachment(manual) is None
+
+
+def test_classify_drive_web_without_transcript_suffix_is_none():
+    # `usp=drive_web` but not a transcript title -> not ingested.
+    att = _transcript_att('Some manually shared doc')
+    assert calendar.classify_attachment(att) is None
+
+
+def test_classify_transcript_without_usp_marker():
+    # Title structure alone classifies a transcript, independent of the `usp=` marker.
+    att = _transcript_att('Weekly - 2026/07/15 16:32 GMT-03:00 - Transcript', usp='sharing')
+    kind, doc_id, title_date = calendar.classify_attachment(att)
+
+    assert kind == 'transcript'
+    assert doc_id == 'doc-t'
+    assert title_date == datetime(2026, 7, 15).date()
+
+
+def test_classify_unrecognised_meet_marker_warns(caplog):
+    # A `meet_*` marker we do not recognise is dropped but logged, so drift is visible.
+    att = {
+        'title': 'Anotações do Gemini',
+        'fileUrl': 'https://docs.google.com/document/d/g2/edit?usp=meet_something_new',
+    }
+
+    with caplog.at_level('WARNING'):
+        assert calendar.classify_attachment(att) is None
+
+    assert any('unrecognised Meet attachment marker' in r.message for r in caplog.records)
+
+
+# --- attachments_for_occurrence ---------------------------------------------
+
+def _occurrence(start, attachments, title='Recurring Sync'):
+    return calendar.CalendarEvent(
+        event_id='occ', title=title, calendar='personal',
+        start_dt=start, end_dt=start + timedelta(hours=1),
+        start_raw=start.isoformat(), end_raw=None, attendees=[], attachments=attachments,
+    )
+
+
+def test_occurrence_binds_only_same_date_transcripts():
+    start = datetime(2026, 7, 15, 16, 30, tzinfo=UTC)
+    attachments = [
+        _transcript_att('Sync - 2026/07/15 16:32 GMT-03:00 - Transcript', doc_id='today'),
+        _transcript_att('Sync - 2026/06/10 16:32 GMT-03:00 - Transcript', doc_id='june'),
+        _transcript_att('Sync - 2026/05/27 16:32 GMT-03:00 - Transcript', doc_id='may'),
+    ]
+
+    result = calendar.attachments_for_occurrence(_occurrence(start, attachments))
+
+    assert result.transcript_ids == ['today']
+    assert result.gemini_id is None
+
+
+def test_occurrence_merges_multi_segment_in_index_order():
+    start = datetime(2026, 7, 15, 16, 30, tzinfo=UTC)
+    attachments = [
+        _transcript_att('Sync - 2026/07/15 16:32 GMT-03:00 - Transcript 2', doc_id='seg2'),
+        _transcript_att('Sync - 2026/07/15 16:32 GMT-03:00 - Transcript', doc_id='seg1'),
+    ]
+
+    result = calendar.attachments_for_occurrence(_occurrence(start, attachments))
+
+    assert result.transcript_ids == ['seg1', 'seg2']
+
+
+def test_occurrence_includes_single_gemini_notes():
+    start = datetime(2026, 7, 15, 16, 30, tzinfo=UTC)
+    attachments = [
+        _transcript_att('Sync - 2026/07/15 16:32 GMT-03:00 - Transcript', doc_id='t'),
+        _gemini_att('g1'),
+    ]
+
+    result = calendar.attachments_for_occurrence(_occurrence(start, attachments))
+
+    assert result.transcript_ids == ['t']
+    assert result.gemini_id == 'g1'
+
+
+def test_occurrence_skips_multiple_gemini_notes():
+    start = datetime(2026, 7, 15, 16, 30, tzinfo=UTC)
+    attachments = [
+        _transcript_att('Sync - 2026/07/15 16:32 GMT-03:00 - Transcript', doc_id='t'),
+        _gemini_att('g1'),
+        _gemini_att('g2'),
+    ]
+
+    result = calendar.attachments_for_occurrence(_occurrence(start, attachments))
+
+    assert result.transcript_ids == ['t']
+    assert result.gemini_id is None
+
+
 # --- credentials -------------------------------------------------------------
 
 def test_build_credentials_missing_token_raises(monkeypatch, tmp_path):

@@ -79,3 +79,37 @@ base_url: https://openrouter.ai/api/v1
 #   prompt_delay_seconds: 0
 #   notify_before_minutes: 5
 #   max_meeting_age_minutes: 20
+
+# --- Google Meet transcript ingestion (OPTIONAL) ----------------------------
+# Complements recording: when Google Meet transcribes a meeting itself (a Workspace
+# feature) it attaches the transcript — and often an "Anotações do Gemini" notes doc —
+# to the calendar event afterward. This flow pulls those Docs from past events and
+# produces the same transcript + summary Markdown the recording pipeline does.
+#
+# PREREQUISITES:
+#   - The meeting must have been transcribed by Google Meet (a Google Workspace feature).
+#   - The added `drive.readonly` OAuth scope means EVERY calendar account must be
+#     re-authorized after upgrading. Re-run for each account:
+#       poetry run python main.py calendar_auth --account {name}
+#     Until re-authorized, calendar features keep working but Drive export fails with a
+#     re-auth message.
+#
+# Run once on demand:
+#   poetry run python main.py meet_transcripts
+# Or enable the menu bar poller below (requires the app to be running).
+#
+# meet_transcripts:
+#   enabled: false
+#   poll_interval_minutes: 15
+#   lookback_hours: 12        # clamped to at most 48h (dedup ledger retention)
+#   max_access_retries: 3     # per-file access retries before giving up (throttled hourly)
+
+# Prompt used to summarize a Meet-sourced transcript. Unlike summary_prompt, this may
+# attribute speech to people, since Meet transcripts carry speaker names. Optional; a
+# sensible default is used when omitted.
+# meet_summary_prompt: |
+#   Você é um assistente que resume transcrições de reuniões em português.
+#   A transcrição a seguir foi gerada pelo Google Meet e identifica quem fala.
+#   Gere um resumo em Markdown com as seções: "Resumo executivo",
+#   "Principais tópicos discutidos" e "Decisões tomadas".
+#   Você pode atribuir falas e decisões às pessoas quando a transcrição as identificar.
