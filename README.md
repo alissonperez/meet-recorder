@@ -189,6 +189,10 @@ Output files are named `TIMESTAMP - Title-Slug.md`, where `TIMESTAMP` and the `Y
 are derived from the recording's start time (parsed from the `.wav` filename), and `Title-Slug`
 is the generated title slugified (and capped to 80 characters).
 
+For what each of the three prompts (`transcription_prompt`, `summary_prompt`, `title_prompt`)
+does, what dynamic calendar-event context is prepended to each, and an example of the output
+frontmatter, see [`docs/prompts.md`](./docs/prompts.md).
+
 See [`pipeline-transcricao.md`](./pipeline-transcricao.md) at the repo root for the prior-art
 pipeline (from an earlier, separate project) that this transcription approach — chunking,
 base64+JSON STT payload, separate title/summary LLM calls — was adapted from.

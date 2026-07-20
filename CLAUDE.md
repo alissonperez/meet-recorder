@@ -13,7 +13,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   - `--help` lists all available commands (`poetry run python main.py --help`)
 - Requires Python 3.13.0 (see `.python-version`); a `.env` file (based on `.env.example`) must exist since `main.py` calls `load_dotenv()` before any handler runs.
 
-There is no test suite configured in this repo yet.
+- Test suite: `poetry run pytest` (tests live under `tests/`; `pytest` and
+  `pytest-cov` are dev dependencies).
+
+## Contribution checklist
+
+- When a change modifies what dynamic context is sent alongside any of the
+  three configurable prompts (transcription, summary, title), update
+  `docs/prompts.md` in the same change so it stays in sync with actual
+  behavior.
 
 ## Architecture
 

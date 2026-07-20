@@ -2,10 +2,12 @@ import base64
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import tempfile
 from datetime import datetime
+from html.parser import HTMLParser
 
 import httpx
 from openai import OpenAI
@@ -20,6 +22,7 @@ AUDIO_SAMPLE_RATE = 16000
 AUDIO_BITRATE = '32k'
 TITLE_MAX_LENGTH = 60
 TITLE_MAX_ATTEMPTS = 3
+EVENT_DESCRIPTION_MAX_LENGTH = 500
 FILENAME_TIMESTAMP_FORMAT = '%Y-%m-%d_%H-%M-%S'
 MONTH_FORMAT = '%Y-%m'
 
@@ -94,7 +97,7 @@ def _split_into_chunks(mp3_path, chunk_duration):
     return chunks
 
 
-def _transcribe_chunk(chunk_path, config):
+def _transcribe_chunk(chunk_path, config, event=None):
     with open(chunk_path, 'rb') as f:
         audio_b64 = base64.b64encode(f.read()).decode('ascii')
 
@@ -104,8 +107,11 @@ def _transcribe_chunk(chunk_path, config):
         'language': 'pt',
     }
 
-    if config.transcription_prompt:
-        payload['prompt'] = config.transcription_prompt
+    prompt = config.transcription_prompt or ''
+    if event is not None:
+        prompt = _event_context(event) + prompt
+    if prompt:
+        payload['prompt'] = prompt
 
     url = f'{config.base_url.rstrip("/")}/audio/transcriptions'
     headers = {'Authorization': f'Bearer {_api_key()}', 'Content-Type': 'application/json'}
@@ -119,9 +125,9 @@ def _transcribe_chunk(chunk_path, config):
     return response.json().get('text', '')
 
 
-def _transcribe_audio(mp3_path, config):
+def _transcribe_audio(mp3_path, config, event=None):
     chunks = _split_into_chunks(mp3_path, config.chunk_duration)
-    texts = [_transcribe_chunk(chunk, config) for chunk in chunks]
+    texts = [_transcribe_chunk(chunk, config, event) for chunk in chunks]
 
     return '\n'.join(texts)
 
@@ -160,8 +166,39 @@ def _generate_title(summary_text, config):
     return title[:TITLE_MAX_LENGTH]
 
 
+class _HTMLTextExtractor(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self._chunks = []
+
+    def handle_data(self, data):
+        self._chunks.append(data)
+
+    def text(self):
+        return ''.join(self._chunks)
+
+
+def _strip_html(text):
+    parser = _HTMLTextExtractor()
+    parser.feed(text)
+    return parser.text()
+
+
+def _clean_event_description(description):
+    text = _strip_html(description)
+    text = re.sub(r'\n\s*\n+', '\n', text).strip()
+    if len(text) > EVENT_DESCRIPTION_MAX_LENGTH:
+        text = text[:EVENT_DESCRIPTION_MAX_LENGTH].rstrip() + '…'
+    return text
+
+
 def _event_context(event):
     lines = [f'Título da reunião: {event.title}']
+    description = getattr(event, 'description', None)
+    if description:
+        cleaned = _clean_event_description(description)
+        if cleaned:
+            lines.append(f'Descrição: {cleaned}')
     if event.attendees:
         lines.append('Participantes: ' + ', '.join(event.attendees))
     return '\n'.join(lines) + '\n\n'
@@ -258,7 +295,7 @@ async def transcribe(wav_path, config=None):
         mp3_path = _preprocess_audio(wav_path)
         tmp_dir = os.path.dirname(mp3_path)
 
-        transcript_text = _transcribe_audio(mp3_path, config)
+        transcript_text = _transcribe_audio(mp3_path, config, event)
         summary_text = _generate_summary(transcript_text, config, event)
         title = event.title if event is not None else _generate_title(summary_text, config)
 

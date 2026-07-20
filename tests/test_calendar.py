@@ -121,6 +121,25 @@ def test_extract_event_captures_fields():
     assert result.attendees == ['Alice']
 
 
+def test_extract_event_captures_description():
+    start = datetime(2024, 3, 15, 10, 0, tzinfo=UTC)
+    raw = _event('Sync', start)
+    raw['description'] = 'Agenda: revisar roadmap'
+
+    result = calendar._extract_event(raw, 'personal', max_attendees=20)
+
+    assert result.description == 'Agenda: revisar roadmap'
+
+
+def test_extract_event_description_is_none_when_absent():
+    start = datetime(2024, 3, 15, 10, 0, tzinfo=UTC)
+    raw = _event('Sync', start)
+
+    result = calendar._extract_event(raw, 'personal', max_attendees=20)
+
+    assert result.description is None
+
+
 # --- find_event --------------------------------------------------------------
 
 def test_find_event_returns_none_when_unconfigured():
