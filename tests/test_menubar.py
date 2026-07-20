@@ -237,6 +237,9 @@ def meet_app(monkeypatch):
     )
     monkeypatch.setattr(menubar_module.MenubarApp, '_load_config_safe', lambda self: config)
     monkeypatch.setattr(menubar_module.rumps.Timer, '__init__', lambda self, *a, **k: None)
+    # The Meet-ingest alerts marshal to the main thread via AppHelper.callAfter; run it
+    # synchronously so assertions on _show_alert still observe the call.
+    monkeypatch.setattr(menubar_module.AppHelper, 'callAfter', lambda func, *a, **k: func(*a, **k))
 
     instance = menubar_module.MenubarApp()
     instance._show_alert = MagicMock()
@@ -327,6 +330,50 @@ def test_scope_error_shows_reauth_alert(meet_app, monkeypatch):
 
     meet_app._show_alert.assert_called_once()
     assert 're-run calendar_auth' in meet_app._show_alert.call_args.kwargs['message']
+
+
+def test_access_error_alert_marshaled_to_main_thread(meet_app, monkeypatch):
+    call_after = MagicMock()
+    monkeypatch.setattr(menubar_module.AppHelper, 'callAfter', call_after)
+
+    meet_app._on_meet_access_error(_event(title='Weekly Sync'))
+
+    # The alert must be dispatched via AppHelper.callAfter (main thread), not called inline.
+    meet_app._show_alert.assert_not_called()
+    call_after.assert_called_once()
+    assert call_after.call_args.args[0] == meet_app._show_alert
+
+
+def test_scope_error_alert_marshaled_to_main_thread(meet_app, monkeypatch):
+    call_after = MagicMock()
+    monkeypatch.setattr(menubar_module.AppHelper, 'callAfter', call_after)
+    monkeypatch.setattr(
+        menubar_module.meet_ingest, 'ingest_once',
+        MagicMock(side_effect=menubar_module.drive.DriveScopeError('re-run calendar_auth')),
+    )
+
+    meet_app._ingest_in_background()
+
+    meet_app._show_alert.assert_not_called()
+    call_after.assert_called_once()
+    assert call_after.call_args.args[0] == meet_app._show_alert
+
+
+def test_active_transcriptions_counter_balances_under_concurrency(meet_app):
+    import threading
+
+    def churn():
+        for _ in range(200):
+            meet_app._begin_transcription()
+            meet_app._end_transcription()
+
+    threads = [threading.Thread(target=churn) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert meet_app.active_transcriptions == 0
 
 
 def test_meet_poll_failure_notifies_on_threshold(meet_app):

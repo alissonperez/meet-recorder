@@ -6,6 +6,7 @@ from datetime import datetime
 
 import rumps
 from AppKit import NSAlert, NSApplication, NSStatusWindowLevel
+from PyObjCTools import AppHelper
 
 from meet_recorder import calendar, drive, meet_ingest, recorder, transcriber
 from meet_recorder.config import load_config
@@ -28,6 +29,7 @@ class MenubarApp(rumps.App):
 
         self.is_recording = False
         self.active_transcriptions = 0
+        self._transcriptions_lock = threading.Lock()
 
         self.start_item = rumps.MenuItem('Iniciar', callback=self.on_start)
         self.stop_item = rumps.MenuItem('Parar', callback=None)
@@ -152,8 +154,7 @@ class MenubarApp(rumps.App):
         thread.start()
 
     def _ingest_in_background(self):
-        self.active_transcriptions += 1
-        self._refresh_title()
+        self._begin_transcription()
 
         try:
             results = meet_ingest.ingest_once(self.config, on_access_error=self._on_meet_access_error)
@@ -162,15 +163,14 @@ class MenubarApp(rumps.App):
                 logger.info(f'Meet transcript ingested: {result["transcript_path"]}')
         except drive.DriveScopeError as e:
             logger.error(str(e))
-            self._show_alert(title='Reautorização necessária', message=str(e), ok='OK')
+            self._show_alert_on_main(title='Reautorização necessária', message=str(e), ok='OK')
         except Exception as e:
             self._on_meet_poll_failure(e)
         finally:
-            self.active_transcriptions -= 1
-            self._refresh_title()
+            self._end_transcription()
 
     def _on_meet_access_error(self, event):
-        self._show_alert(
+        self._show_alert_on_main(
             title='Transcrição inacessível',
             message=f'Não foi possível acessar a transcrição de "{event.title}"; tentaremos novamente.',
             ok='OK',
@@ -332,9 +332,14 @@ class MenubarApp(rumps.App):
 
         return alert.runModal()
 
+    def _show_alert_on_main(self, title, message, ok='OK'):
+        # AppKit requires NSAlert on the main thread; the Meet-ingest alerts fire from a
+        # background poll thread, so marshal the call instead of touching NSAlert directly.
+        # These are OK-only alerts whose modal return value is ignored, so async is fine.
+        AppHelper.callAfter(self._show_alert, title=title, message=message, ok=ok)
+
     def _recover_in_background(self, orphan_dirs):
-        self.active_transcriptions += 1
-        self._refresh_title()
+        self._begin_transcription()
 
         try:
             for orphan_dir in orphan_dirs:
@@ -350,8 +355,19 @@ class MenubarApp(rumps.App):
                     logger.error(f'Transcription failed for {path}: {e}')
                     self._notify('Transcription failed', str(e))
         finally:
+            self._end_transcription()
+
+    def _begin_transcription(self):
+        # active_transcriptions is mutated by several background threads; += / -= are
+        # read-modify-write and not atomic, so serialize under a lock.
+        with self._transcriptions_lock:
+            self.active_transcriptions += 1
+        self._refresh_title()
+
+    def _end_transcription(self):
+        with self._transcriptions_lock:
             self.active_transcriptions -= 1
-            self._refresh_title()
+        self._refresh_title()
 
     def _refresh_title(self):
         if self.is_recording and self.active_transcriptions > 0:
@@ -395,8 +411,7 @@ class MenubarApp(rumps.App):
         self._set_recording_state(False)
 
     def _transcribe_in_background(self, path):
-        self.active_transcriptions += 1
-        self._refresh_title()
+        self._begin_transcription()
 
         try:
             asyncio.run(transcriber.transcribe(path))
@@ -405,8 +420,7 @@ class MenubarApp(rumps.App):
             logger.error(f'Transcription failed for {path}: {e}')
             self._notify('Transcription failed', str(e))
         finally:
-            self.active_transcriptions -= 1
-            self._refresh_title()
+            self._end_transcription()
 
     def on_silence_warning(self):
         self._notify(
