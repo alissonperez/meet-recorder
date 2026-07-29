@@ -190,11 +190,11 @@ def _extract_event(event, account, max_attendees):
     )
 
 
-def _eligible_events(events, config):
+def _eligible_events(events, config, exclude_declined=True):
     '''Filter raw API events by decline/ignore status, keeping those with a parseable start.'''
     for event in events:
         title = event.get('summary', '(sem título)')
-        if _is_declined(event):
+        if exclude_declined and _is_declined(event):
             logger.debug(f'"{title}": dropped (declined)')
             continue
         if _matches_ignore_slug(event, config.ignored_event_slugs):
@@ -276,8 +276,10 @@ def upcoming_events(config, within_minutes):
 def past_events(config, lookback_hours):
     '''Return occurrences whose end time is within [now - lookback_hours, now], all accounts.
 
-    Applies the same decline/ignore filtering as elsewhere; a per-account query failure is
-    logged and skipped so other accounts still return. Sorted by start time.'''
+    Applies ignore-slug filtering but not decline filtering — a declined event may still
+    have a real transcript/Gemini-notes doc attached, so it stays a candidate here. A
+    per-account query failure is logged and skipped so other accounts still return. Sorted
+    by start time.'''
     now = datetime.now().astimezone()
     time_min = now - timedelta(hours=lookback_hours)
     logger.debug(f'Querying past events between {time_min} and {now} for accounts: {config.calendars}')
@@ -290,7 +292,7 @@ def past_events(config, lookback_hours):
             logger.warning(f'Past-events query failed for account "{account}": {e}')
             continue
 
-        for event in _eligible_events(raw_events, config):
+        for event in _eligible_events(raw_events, config, exclude_declined=False):
             occurrence = _extract_event(event, account, config.max_attendees)
             if occurrence.end_dt is not None and time_min <= occurrence.end_dt <= now:
                 results.append(occurrence)

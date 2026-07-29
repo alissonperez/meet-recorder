@@ -378,6 +378,10 @@ How it works and its limits:
   processed or abandoned meeting from being reprocessed. A transcript that isn't attached yet is
   simply retried on the next poll; a doc that's attached but unreadable (not shared with you) is
   retried at most hourly, then abandoned — the menu bar app shows a one-time modal the first time.
+- **Declined events are not excluded here** (unlike the recording-anchored and auto-record
+  lookups above): RSVP status often doesn't reflect whether a meeting was actually attended, so a
+  declined event with a real transcript/Gemini-notes doc still gets ingested. Events matching
+  `ignored_event_slugs` are still excluded.
 
 ## Autostart at login (launchd)
 

@@ -335,6 +335,31 @@ def test_past_events_sorted_and_skips_failing_account(monkeypatch):
     assert [e.id for e in events] == ['a', 'b']
 
 
+def test_past_events_retains_declined_events(monkeypatch):
+    now = datetime.now().astimezone()
+    declined = _event(
+        'Declined', now - timedelta(hours=2), end=now - timedelta(hours=1),
+        attendees=[{'self': True, 'responseStatus': 'declined'}], event_id='declined',
+    )
+
+    monkeypatch.setattr(calendar, '_query_events', lambda a, mn, mx: [declined])
+
+    events = calendar.past_events(_config(), lookback_hours=12)
+
+    assert [e.id for e in events] == ['declined']
+
+
+def test_declined_events_still_excluded_from_upcoming_and_find_event(monkeypatch):
+    now = datetime.now(UTC)
+    declined = _event('Skip', now + timedelta(minutes=3),
+                       attendees=[{'self': True, 'responseStatus': 'declined'}], event_id='x')
+
+    monkeypatch.setattr(calendar, '_query_events', lambda a, mn, mx: [declined])
+
+    assert calendar.upcoming_events(_config(), within_minutes=10) == []
+    assert calendar.find_event(now, _config()) is None
+
+
 # --- attachment classification ----------------------------------------------
 
 def _transcript_att(title, doc_id='doc-t', usp='drive_web'):
