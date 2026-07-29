@@ -28,11 +28,15 @@ The system SHALL load each account's OAuth client credentials from `~/.config/me
 - **THEN** calendar operations for that account fail non-fatally, the failure is logged as a warning, and unrelated app behavior (recording, transcription without enrichment) continues
 
 ### Requirement: One-time OAuth setup command
-The system SHALL provide a CLI command that runs the interactive Google OAuth flow for a named account using the `calendar.readonly` scope and writes the resulting token to that account's token file with owner-only permissions.
+The system SHALL provide a CLI command that runs the interactive Google OAuth flow for a named account using the `calendar.readonly` and `drive.readonly` scopes and writes the resulting token to that account's token file with owner-only permissions. Tokens authorized before the Drive scope was added SHALL be treated as insufficient for Drive operations and require re-running this command.
 
 #### Scenario: Authorizing an account
 - **WHEN** the user runs the calendar auth command for an account whose credentials file exists
-- **THEN** a browser-based OAuth flow completes and the token is written to `~/.config/meet-recorder/tokens/{account}.json` with mode 0600
+- **THEN** a browser-based OAuth flow completes granting calendar and Drive read access, and the token is written to `~/.config/meet-recorder/tokens/{account}.json` with mode 0600
+
+#### Scenario: Pre-Drive token needs re-authorization
+- **WHEN** an account's token was authorized only for `calendar.readonly` and a Drive operation is attempted
+- **THEN** the Drive operation fails non-fatally with a message instructing the user to re-run the calendar auth command for that account, while calendar-only operations continue to work
 
 ### Requirement: Automatic token refresh with persistence
 The system SHALL refresh an expired token that has a refresh token before making calendar requests, and SHALL persist the refreshed token back to the account's token file.
@@ -46,7 +50,7 @@ The system SHALL find the calendar event matching a recording by querying all co
 
 #### Scenario: Event found within the window
 - **WHEN** a recording's start time falls within the configured match window of an accepted event on any configured account
-- **THEN** that event (title, source account, start/end, and attendee display names) is returned as the match
+- **THEN** that event (title, description, source account, start/end, and attendee display names) is returned as the match
 
 #### Scenario: Recording started after the meeting began
 - **WHEN** a recording is started up to the configured "before" window (e.g. ~30 minutes) after an event's start time
@@ -68,6 +72,10 @@ The system SHALL find the calendar event matching a recording by querying all co
 - **WHEN** no event survives filtering within the window, or calendar is unconfigured, or the lookup errors
 - **THEN** no match is returned and the caller proceeds without calendar data
 
+#### Scenario: Event without a description
+- **WHEN** a matched event's API payload has no `description` field
+- **THEN** the returned event has no description (absent, not an empty string), and callers that build prompt context from it treat it the same as an event with no attendees
+
 ### Requirement: RSVP and ignore-slug filtering
 The system SHALL exclude from candidacy any event the user has declined and any event whose slugified title contains a configured ignore-slug.
 
@@ -82,3 +90,18 @@ The system SHALL exclude from candidacy any event the user has declined and any 
 #### Scenario: Event without attendee response accepted
 - **WHEN** a candidate event has no attendee list or no explicit response for the user
 - **THEN** it is not excluded on RSVP grounds and remains a candidate
+
+### Requirement: Past-events lookup with attachments
+The system SHALL provide a lookup that returns, across all configured accounts, the event occurrences whose end time falls within a look-back window ending at the current time, applying the same decline and ignore-slug filtering used elsewhere, and SHALL expose each returned occurrence's Google Doc attachments (title and the Drive file id recoverable from the attachment `fileUrl`).
+
+#### Scenario: Occurrences ended within the window are returned
+- **WHEN** the lookup is invoked with a look-back window
+- **THEN** occurrences whose end time is within `[now - window, now]` on any configured account are returned, sorted by start time, excluding declined and ignore-slug-matched events
+
+#### Scenario: Attachments exposed per occurrence
+- **WHEN** a returned occurrence has Google Doc attachments
+- **THEN** each attachment's title and Drive file id (parsed from its `fileUrl`) are available on the returned event for downstream classification
+
+#### Scenario: Look-back lookup failure is non-fatal per account
+- **WHEN** the calendar query fails for one account
+- **THEN** that account is skipped with a logged warning and occurrences from other accounts are still returned
