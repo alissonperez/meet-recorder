@@ -77,26 +77,30 @@ The system SHALL find the calendar event matching a recording by querying all co
 - **THEN** the returned event has no description (absent, not an empty string), and callers that build prompt context from it treat it the same as an event with no attendees
 
 ### Requirement: RSVP and ignore-slug filtering
-The system SHALL exclude from candidacy any event the user has declined and any event whose slugified title contains a configured ignore-slug.
+The system SHALL exclude from candidacy any event whose slugified title contains a configured ignore-slug. For recording-anchored lookup (`find_event`) and upcoming-event lookup (`upcoming_events`), the system SHALL additionally exclude any event the user has declined. For past-event lookup used by Meet-transcript ingestion (`past_events`), declined events SHALL remain candidates — RSVP status is not used to exclude them.
 
-#### Scenario: Declined event excluded
-- **WHEN** a candidate event lists the user as an attendee with response status "declined"
+#### Scenario: Declined event excluded from recording-anchored and upcoming-event lookup
+- **WHEN** a candidate event lists the user as an attendee with response status "declined", and the lookup is `find_event` or `upcoming_events`
 - **THEN** that event is excluded from matching
 
-#### Scenario: Ignored title excluded
+#### Scenario: Declined event retained for past-event/Meet-transcript lookup
+- **WHEN** a candidate event lists the user as an attendee with response status "declined", and the lookup is `past_events`
+- **THEN** that event remains a candidate and is evaluated for transcript/Gemini-notes attachments like any other occurrence
+
+#### Scenario: Ignored title excluded everywhere
 - **WHEN** a candidate event's slugified title contains any entry from the configured ignore-slug list
-- **THEN** that event is excluded from matching
+- **THEN** that event is excluded from matching regardless of which lookup (`find_event`, `upcoming_events`, or `past_events`) is being performed
 
 #### Scenario: Event without attendee response accepted
 - **WHEN** a candidate event has no attendee list or no explicit response for the user
 - **THEN** it is not excluded on RSVP grounds and remains a candidate
 
 ### Requirement: Past-events lookup with attachments
-The system SHALL provide a lookup that returns, across all configured accounts, the event occurrences whose end time falls within a look-back window ending at the current time, applying the same decline and ignore-slug filtering used elsewhere, and SHALL expose each returned occurrence's Google Doc attachments (title and the Drive file id recoverable from the attachment `fileUrl`).
+The system SHALL provide a lookup that returns, across all configured accounts, the event occurrences whose end time falls within a look-back window ending at the current time, applying ignore-slug filtering (but not decline-based exclusion) as described in the RSVP and ignore-slug filtering requirement, and SHALL expose each returned occurrence's Google Doc attachments (title and the Drive file id recoverable from the attachment `fileUrl`).
 
 #### Scenario: Occurrences ended within the window are returned
 - **WHEN** the lookup is invoked with a look-back window
-- **THEN** occurrences whose end time is within `[now - window, now]` on any configured account are returned, sorted by start time, excluding declined and ignore-slug-matched events
+- **THEN** occurrences whose end time is within `[now - window, now]` on any configured account are returned, sorted by start time, including declined events and excluding ignore-slug-matched events
 
 #### Scenario: Attachments exposed per occurrence
 - **WHEN** a returned occurrence has Google Doc attachments
