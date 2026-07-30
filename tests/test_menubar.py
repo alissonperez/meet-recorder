@@ -397,3 +397,42 @@ def test_calendar_poll_kickoff_seeds_cache_and_runs_immediate_check(app_with_cal
     assert app_with_calendar._cached_events == [event]
     app_with_calendar._show_alert.assert_called_once()
     assert event.id in app_with_calendar._prompted_events
+
+
+def test_discard_item_enabled_only_while_recording(app):
+    assert app.discard_item.callback is None
+
+    app._set_recording_state(True)
+    assert app.discard_item.callback == app.on_discard
+
+    app._set_recording_state(False)
+    assert app.discard_item.callback is None
+
+
+def test_on_discard_confirms_discards_and_resets_state(app, monkeypatch):
+    app._set_recording_state(True)
+    app._show_alert.return_value = 1
+    discard_recording = MagicMock()
+    monkeypatch.setattr(menubar_module.recorder, 'discard_recording', discard_recording)
+
+    app.on_discard(None)
+
+    discard_recording.assert_called_once()
+    assert app.is_recording is False
+    assert app.discard_item.callback is None
+    assert app.stop_item.callback is None
+    assert app.stop_no_transcribe_item.callback is None
+    assert app.start_item.callback == app.on_start
+
+
+def test_on_discard_cancel_leaves_recording_running(app, monkeypatch):
+    app._set_recording_state(True)
+    app._show_alert.return_value = 0
+    discard_recording = MagicMock()
+    monkeypatch.setattr(menubar_module.recorder, 'discard_recording', discard_recording)
+
+    app.on_discard(None)
+
+    discard_recording.assert_not_called()
+    assert app.is_recording is True
+    assert app.discard_item.callback == app.on_discard

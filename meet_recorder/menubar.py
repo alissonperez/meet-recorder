@@ -34,9 +34,12 @@ class MenubarApp(rumps.App):
         self.start_item = rumps.MenuItem('Iniciar', callback=self.on_start)
         self.stop_item = rumps.MenuItem('Parar', callback=None)
         self.stop_no_transcribe_item = rumps.MenuItem('Parar e não transcrever', callback=None)
+        self.discard_item = rumps.MenuItem('Descartar', callback=None)
         self.quit_item = rumps.MenuItem('Sair', callback=self.on_quit)
 
-        self.menu = [self.start_item, self.stop_item, self.stop_no_transcribe_item, self.quit_item]
+        self.menu = [
+            self.start_item, self.stop_item, self.stop_no_transcribe_item, self.discard_item, self.quit_item,
+        ]
 
         recorder.on_silence_warning = self.on_silence_warning
 
@@ -385,6 +388,7 @@ class MenubarApp(rumps.App):
         self.start_item.set_callback(None if recording else self.on_start)
         self.stop_item.set_callback(self.on_stop if recording else None)
         self.stop_no_transcribe_item.set_callback(self.on_stop_no_transcribe if recording else None)
+        self.discard_item.set_callback(self.on_discard if recording else None)
 
     def on_start(self, _):
         try:
@@ -407,6 +411,18 @@ class MenubarApp(rumps.App):
     def on_stop_no_transcribe(self, _):
         path = recorder.stop_recording_and_save()
         logger.info(f'Recording saved to {path} (transcription skipped)')
+
+        self._set_recording_state(False)
+
+    def on_discard(self, _):
+        response = self._show_alert(
+            title='Descartar gravação?', message='', ok='Descartar', cancel='Cancelar',
+        )
+        if response != 1:
+            return
+
+        recorder.discard_recording()
+        logger.info('Recording discarded')
 
         self._set_recording_state(False)
 
