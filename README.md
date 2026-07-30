@@ -13,8 +13,8 @@ Markdown transcripts and LLM-generated summaries, optionally enriched with your 
   (the other call participants) simultaneously into a single stereo WAV file (channel 0 = mic,
   channel 1 = system audio), using [ScreenCaptureKit](#audio-capture-setup-screencapturekit) —
   no virtual audio driver, no output-device switching, system volume stays controllable.
-- **[Menu bar app](#menu-bar-app)** — start/stop recordings on demand from a macOS menu bar
-  icon, with status icons for the recording/transcribing states and native notifications for
+- **[Menu bar app](#menu-bar-app)** — start/stop/discard recordings on demand from a macOS menu
+  bar icon, with status icons for the recording/transcribing states and native notifications for
   failures (e.g. silent system audio, transcription errors).
 - **[Transcription + summary](#transcription)** — after a recording stops, it's chunked,
   transcribed via an OpenAI-compatible API (OpenRouter by default), and written out as a
@@ -120,6 +120,9 @@ This launches a menu bar icon with a submenu:
   background (disabled while idle).
 - **Parar e não transcrever** — stops and saves the current recording exactly like **Parar**, but
   skips transcription entirely (disabled while idle).
+- **Descartar** — discards the current recording entirely after a confirmation modal: capture
+  stops immediately, no `.wav` is written, and the temporary buffers are deleted (disabled while
+  idle).
 - **Sair** — quits the app, automatically stopping and saving any in-progress recording first. If
   one or more transcriptions are still running in the background, a confirmation alert is shown
   first (see [Transcription](#transcription) below); declining leaves the app running.

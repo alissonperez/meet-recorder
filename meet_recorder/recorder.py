@@ -328,10 +328,7 @@ def merge_and_cleanup(mic_path, sys_path, temp_dir):
     return path
 
 
-def stop_recording_and_save():
-    if _state['mic_stream'] is None:
-        raise RuntimeError('No recording is in progress')
-
+def _teardown_capture():
     try:
         _stop_early_buffer_check()
         _stop_silence_monitor()
@@ -349,7 +346,7 @@ def stop_recording_and_save():
         _stop_writer(_state['mic_queue'], _state['mic_writer_thread'])
         _stop_writer(_state['sys_queue'], _state['sys_writer_thread'])
 
-        return merge_and_cleanup(_state['mic_temp_path'], _state['sys_temp_path'], _state['temp_dir'])
+        return _state['mic_temp_path'], _state['sys_temp_path'], _state['temp_dir']
     finally:
         _state['mic_stream'] = None
         _state['sys_handle'] = None
@@ -363,6 +360,22 @@ def stop_recording_and_save():
         _state['silence_buffer'] = None
         _state['silence_buffer_lock'] = None
         _state['first_sys_chunk_received'] = None
+
+
+def stop_recording_and_save():
+    if _state['mic_stream'] is None:
+        raise RuntimeError('No recording is in progress')
+
+    mic_temp_path, sys_temp_path, temp_dir = _teardown_capture()
+    return merge_and_cleanup(mic_temp_path, sys_temp_path, temp_dir)
+
+
+def discard_recording():
+    if _state['mic_stream'] is None:
+        raise RuntimeError('No recording is in progress')
+
+    _mic_temp_path, _sys_temp_path, temp_dir = _teardown_capture()
+    shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 def _build_output_path(timestamp):

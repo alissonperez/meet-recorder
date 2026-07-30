@@ -392,3 +392,36 @@ def test_stop_recording_still_stops_writers_and_merges_when_mic_stream_stop_rais
     mic_stream.close.assert_called_once()
     assert recorder._state['mic_stream'] is None
     assert recorder._state['sys_handle'] is None
+
+
+def test_discard_recording_raises_when_no_recording_in_progress():
+    with pytest.raises(RuntimeError, match='No recording is in progress'):
+        recorder.discard_recording()
+
+
+def test_discard_recording_removes_temp_dir_without_writing_output(tmp_path, monkeypatch):
+    recordings_dir = tmp_path / 'recordings'
+    monkeypatch.setenv('RECORDINGS_DIR', str(recordings_dir))
+    monkeypatch.setattr(recorder.sd.default, 'device', (0, 0))
+
+    mic_stream = MagicMock()
+    monkeypatch.setattr(recorder.sd, 'InputStream', MagicMock(return_value=mic_stream))
+    fake_handle = MagicMock()
+    sck_stop = MagicMock()
+    monkeypatch.setattr(recorder.sck_capture, 'start', MagicMock(return_value=fake_handle))
+    monkeypatch.setattr(recorder.sck_capture, 'stop', sck_stop)
+
+    recorder.start_recording()
+    temp_dir = recorder._state['temp_dir']
+    assert os.path.isdir(temp_dir)
+
+    recorder.discard_recording()
+
+    assert not os.path.exists(temp_dir)
+    assert list(recordings_dir.glob('*.wav')) == []
+    sck_stop.assert_called_once_with(fake_handle)
+    mic_stream.stop.assert_called_once()
+    mic_stream.close.assert_called_once()
+    assert recorder._state['mic_stream'] is None
+    assert recorder._state['sys_handle'] is None
+    assert recorder._state['temp_dir'] is None
