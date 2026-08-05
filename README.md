@@ -34,7 +34,8 @@ Markdown transcripts and LLM-generated summaries, optionally enriched with your 
   behind by a crash and lets you process, ignore, or delete each one.
 - **CLI commands** for everything: `record` (fixed-duration recording), `menubar`, `transcribe`
   (re-run the pipeline on any existing `.wav`), `meet_transcripts` (ingest Meet transcripts from
-  calendar events), `calendar_auth`, and `recover` — see `poetry run python main.py --help`.
+  calendar events), `ingest_transcript` (ingest a standalone Google Doc transcript, e.g. a meeting
+  you didn't attend), `calendar_auth`, and `recover` — see `poetry run python main.py --help`.
 
 ## Requirements
 
@@ -385,6 +386,25 @@ How it works and its limits:
   lookups above): RSVP status often doesn't reflect whether a meeting was actually attended, so a
   declined event with a real transcript/Gemini-notes doc still gets ingested. Events matching
   `ignored_event_slugs` are still excluded.
+
+## Ingesting a standalone transcript doc
+
+For a meeting you weren't part of (e.g. someone else's interview) that only exists as a Google Doc
+somewhere, `ingest_transcript` runs that Doc through the standard summary/output pipeline directly,
+without needing a matching calendar event:
+
+```
+$ poetry run python main.py ingest_transcript --url="https://docs.google.com/document/d/<id>/edit" --account=personal
+```
+
+- `--url` must be a Google Docs link (`/document/d/<id>/...`); Drive `/file/d/` links aren't
+  supported since export goes through the Docs export API.
+- `--account` selects which calendar account's token to use for the Drive API call (same accounts
+  configured for `calendar_auth`).
+- `--title` is optional; when omitted, a title is generated from the summary via `title_prompt`,
+  same as `transcribe` without a calendar match.
+- Output uses `summary_prompt` (not the speaker-aware `meet_summary_prompt`) and no event context is
+  prepended, since there's no calendar occurrence to draw it from.
 
 ## Autostart at login (launchd)
 
