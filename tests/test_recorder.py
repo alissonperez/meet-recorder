@@ -311,6 +311,27 @@ def test_start_recording_forwards_sck_chunks_through_sys_queue(tmp_path, monkeyp
     recorder.stop_recording_and_save()
 
 
+def test_start_recording_refreshes_audio_devices_before_finding_mic_device(tmp_path, monkeypatch):
+    monkeypatch.setenv('RECORDINGS_DIR', str(tmp_path))
+    monkeypatch.setattr(recorder.sd.default, 'device', (0, 0))
+    monkeypatch.setattr(recorder.sd, 'InputStream', MagicMock(return_value=MagicMock()))
+    monkeypatch.setattr(recorder.sck_capture, 'start', MagicMock(return_value=MagicMock()))
+    monkeypatch.setattr(recorder.sck_capture, 'stop', MagicMock())
+
+    call_order = []
+    monkeypatch.setattr(recorder.sd, '_terminate', MagicMock(side_effect=lambda: call_order.append('terminate')))
+    monkeypatch.setattr(recorder.sd, '_initialize', MagicMock(side_effect=lambda: call_order.append('initialize')))
+    find_device_spy = MagicMock(side_effect=recorder._find_default_mic_device)
+    monkeypatch.setattr(recorder, '_find_default_mic_device', find_device_spy)
+
+    recorder.start_recording()
+
+    assert call_order == ['terminate', 'initialize']
+    find_device_spy.assert_called_once()
+
+    recorder.stop_recording_and_save()
+
+
 def _spy_on_start_writer(monkeypatch):
     '''Let the real _start_writer/_stop_writer run (so cleanup is genuine), but record the
     threads created so failure-path tests can assert they were actually joined.'''
@@ -336,10 +357,16 @@ def test_start_recording_cleans_up_when_sck_capture_start_fails(tmp_path, monkey
     monkeypatch.setattr(recorder.sck_capture, 'start', MagicMock(side_effect=RuntimeError('no permission')))
     sck_stop = MagicMock()
     monkeypatch.setattr(recorder.sck_capture, 'stop', sck_stop)
+    terminate_spy = MagicMock()
+    initialize_spy = MagicMock()
+    monkeypatch.setattr(recorder.sd, '_terminate', terminate_spy)
+    monkeypatch.setattr(recorder.sd, '_initialize', initialize_spy)
 
     with pytest.raises(RuntimeError, match='no permission'):
         recorder.start_recording()
 
+    terminate_spy.assert_called_once()
+    initialize_spy.assert_called_once()
     assert len(threads) == 2
     assert all(not t.is_alive() for t in threads)
     mic_stream.close.assert_called_once()
@@ -361,10 +388,16 @@ def test_start_recording_cleans_up_when_mic_stream_start_fails(tmp_path, monkeyp
     monkeypatch.setattr(recorder.sck_capture, 'start', MagicMock(return_value=fake_handle))
     sck_stop = MagicMock()
     monkeypatch.setattr(recorder.sck_capture, 'stop', sck_stop)
+    terminate_spy = MagicMock()
+    initialize_spy = MagicMock()
+    monkeypatch.setattr(recorder.sd, '_terminate', terminate_spy)
+    monkeypatch.setattr(recorder.sd, '_initialize', initialize_spy)
 
     with pytest.raises(RuntimeError, match='PortAudio error'):
         recorder.start_recording()
 
+    terminate_spy.assert_called_once()
+    initialize_spy.assert_called_once()
     assert len(threads) == 2
     assert all(not t.is_alive() for t in threads)
     mic_stream.close.assert_called_once()

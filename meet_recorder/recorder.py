@@ -78,6 +78,14 @@ def _silence_window_seconds():
     return float(os.environ.get('SILENCE_WINDOW_SECONDS', DEFAULT_SILENCE_WINDOW_SECONDS))
 
 
+def _refresh_audio_devices():
+    # sd._terminate()/sd._initialize() are private sounddevice calls (pinned sounddevice
+    # version in pyproject.toml) that force PortAudio to re-enumerate CoreAudio's current
+    # device list, instead of reusing a snapshot cached since process/library startup.
+    sd._terminate()
+    sd._initialize()
+
+
 def _find_default_mic_device():
     device_index, _ = sd.default.device
     if device_index is None or device_index < 0:
@@ -227,6 +235,7 @@ def start_recording():
     if _state['mic_stream'] is not None:
         raise RuntimeError('A recording is already in progress')
 
+    _refresh_audio_devices()
     mic_device = _find_default_mic_device()
 
     temp_dir, mic_temp_path, sys_temp_path = _build_temp_paths()

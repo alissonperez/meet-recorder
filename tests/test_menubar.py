@@ -1,3 +1,5 @@
+import threading
+import time
 from datetime import datetime, timedelta
 from unittest.mock import MagicMock
 
@@ -40,6 +42,40 @@ class _StubConfig:
         return bool(self.calendars)
 
 
+class _SyncThread:
+    '''Stand-in for threading.Thread that runs its target immediately on .start(), so tests
+    exercising the background-start path stay synchronous and deterministic.'''
+
+    def __init__(self, target=None, args=(), kwargs=None, daemon=None):
+        self._target = target
+        self._args = args
+        self._kwargs = kwargs or {}
+
+    def start(self):
+        self._target(*self._args, **self._kwargs)
+
+    def join(self, timeout=None):
+        pass
+
+
+class _SyncThreadingModule:
+    '''Stands in for the `threading` module reference inside menubar_module: every other
+    attribute (Lock, Event, Timer, ...) delegates to the real threading module, but Thread
+    is replaced so patching it doesn't mutate the real threading.Thread class used elsewhere
+    (e.g. by real background threads spawned in other tests).'''
+    Thread = _SyncThread
+
+    def __getattr__(self, name):
+        return getattr(threading, name)
+
+
+def _run_start_synchronously(monkeypatch):
+    # start_recording() is dispatched to a background thread with the result marshaled back
+    # via AppHelper.callAfter; run both inline so assertions can observe the result immediately.
+    monkeypatch.setattr(menubar_module, 'threading', _SyncThreadingModule())
+    monkeypatch.setattr(menubar_module.AppHelper, 'callAfter', lambda func, *a, **k: func(*a, **k))
+
+
 @pytest.fixture
 def app(monkeypatch):
     monkeypatch.setattr(menubar_module.MenubarApp, '_load_config_safe', lambda self: _StubConfig(enabled=False))
@@ -47,6 +83,7 @@ def app(monkeypatch):
     monkeypatch.setattr(
         menubar_module.rumps.Timer, '__init__', lambda self, *a, **k: None,
     )
+    _run_start_synchronously(monkeypatch)
 
     instance = menubar_module.MenubarApp()
     instance._show_alert = MagicMock()
@@ -60,6 +97,7 @@ def app_with_calendar(monkeypatch):
     monkeypatch.setattr(
         menubar_module.rumps.Timer, '__init__', lambda self, *a, **k: None,
     )
+    _run_start_synchronously(monkeypatch)
 
     instance = menubar_module.MenubarApp()
     instance._show_alert = MagicMock()
@@ -423,6 +461,78 @@ def test_on_discard_confirms_discards_and_resets_state(app, monkeypatch):
     assert app.stop_item.callback is None
     assert app.stop_no_transcribe_item.callback is None
     assert app.start_item.callback == app.on_start
+
+
+def test_on_start_runs_recording_in_background_without_blocking(app, monkeypatch):
+    # Use a real thread here (rather than the fixture's synchronous stub) to prove the menu
+    # bar stays responsive while start_recording() is still pending.
+    monkeypatch.setattr(menubar_module, 'threading', threading)
+    monkeypatch.setattr(menubar_module.AppHelper, 'callAfter', lambda func, *a, **k: func(*a, **k))
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow_start_recording():
+        started.set()
+        release.wait(timeout=5)
+
+    monkeypatch.setattr(menubar_module.recorder, 'start_recording', slow_start_recording)
+
+    app.on_start(None)
+    assert started.wait(timeout=5) is True
+
+    # While the background start is still pending, other menu actions remain callable
+    # (menu state hasn't flipped to "recording" yet, but nothing is frozen/blocked).
+    assert app.start_item.callback is None
+    assert app._start_in_progress is True
+    app.on_discard(None)  # must return immediately rather than blocking on the pending start
+    app._show_alert.assert_called_once()
+
+    release.set()
+    for _ in range(500):
+        if not app._start_in_progress:
+            break
+        time.sleep(0.01)
+
+    assert app.is_recording is True
+    assert app.start_item.callback is None
+    assert app.stop_item.callback == app.on_stop
+
+
+def test_on_start_second_click_while_in_flight_is_noop(app, monkeypatch):
+    start_recording = MagicMock()
+    monkeypatch.setattr(menubar_module.recorder, 'start_recording', start_recording)
+    app._start_in_progress = True
+    app.start_item.set_callback(None)
+
+    app.on_start(None)
+
+    start_recording.assert_not_called()
+
+
+def test_on_start_failure_shows_alert_and_reenables_start(app, monkeypatch):
+    start_recording = MagicMock(side_effect=RuntimeError('no mic'))
+    monkeypatch.setattr(menubar_module.recorder, 'start_recording', start_recording)
+    alert = MagicMock()
+    monkeypatch.setattr(menubar_module.rumps, 'alert', alert)
+
+    app.on_start(None)
+
+    alert.assert_called_once_with(title='Failed to start recording', message='no mic')
+    assert app._start_in_progress is False
+    assert app.start_item.callback == app.on_start
+
+
+def test_on_start_success_enables_stop_items(app, monkeypatch):
+    monkeypatch.setattr(menubar_module.recorder, 'start_recording', MagicMock())
+
+    app.on_start(None)
+
+    assert app._start_in_progress is False
+    assert app.is_recording is True
+    assert app.start_item.callback is None
+    assert app.stop_item.callback == app.on_stop
+    assert app.stop_no_transcribe_item.callback == app.on_stop_no_transcribe
+    assert app.discard_item.callback == app.on_discard
 
 
 def test_on_discard_cancel_leaves_recording_running(app, monkeypatch):

@@ -30,6 +30,7 @@ class MenubarApp(rumps.App):
         self.is_recording = False
         self.active_transcriptions = 0
         self._transcriptions_lock = threading.Lock()
+        self._start_in_progress = False
 
         self.start_item = rumps.MenuItem('Iniciar', callback=self.on_start)
         self.stop_item = rumps.MenuItem('Parar', callback=None)
@@ -309,14 +310,12 @@ class MenubarApp(rumps.App):
             return
 
         logger.info(f'User confirmed recording for "{event.title}", starting')
-        try:
-            recorder.start_recording()
-        except Exception as e:
-            logger.error(f'Failed to start recording for "{event.title}": {e}')
-            rumps.alert(title='Falha ao iniciar gravação', message=str(e))
-            return
 
-        self._set_recording_state(True)
+        def on_failure(error):
+            logger.error(f'Failed to start recording for "{event.title}": {error}')
+            self._on_start_failure(error, alert_title='Falha ao iniciar gravação')
+
+        self._start_recording_async(on_failure=on_failure)
 
     def _show_alert(self, title, message, ok=None, cancel=None, other=None):
         # This scan runs on a background timer rather than a user-initiated menu click, so
@@ -390,14 +389,40 @@ class MenubarApp(rumps.App):
         self.stop_no_transcribe_item.set_callback(self.on_stop_no_transcribe if recording else None)
         self.discard_item.set_callback(self.on_discard if recording else None)
 
-    def on_start(self, _):
-        try:
-            recorder.start_recording()
-        except Exception as e:
-            rumps.alert(title='Failed to start recording', message=str(e))
+    def _start_recording_async(self, on_failure=None):
+        # recorder.start_recording() can block for a long time (or hang) on a stale
+        # CoreAudio device reference; running it inline here would freeze the AppKit
+        # run loop and the whole menu bar with it. Run it on a daemon thread instead and
+        # marshal the result back via AppHelper.callAfter, same pattern as
+        # _transcribe_in_background/_show_alert_on_main.
+        if self._start_in_progress:
             return
 
+        self._start_in_progress = True
+        self.start_item.set_callback(None)
+
+        def worker():
+            try:
+                recorder.start_recording()
+            except Exception as e:
+                AppHelper.callAfter(on_failure or self._on_start_failure, e)
+            else:
+                AppHelper.callAfter(self._on_start_success)
+
+        thread = threading.Thread(target=worker, daemon=True)
+        thread.start()
+
+    def _on_start_success(self):
+        self._start_in_progress = False
         self._set_recording_state(True)
+
+    def _on_start_failure(self, error, alert_title='Failed to start recording'):
+        self._start_in_progress = False
+        self.start_item.set_callback(self.on_start)
+        rumps.alert(title=alert_title, message=str(error))
+
+    def on_start(self, _):
+        self._start_recording_async()
 
     def on_stop(self, _):
         path = recorder.stop_recording_and_save()
