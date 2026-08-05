@@ -5,7 +5,15 @@ import threading
 from datetime import datetime
 
 import rumps
-from AppKit import NSAlert, NSApplication, NSStatusWindowLevel
+from AppKit import (
+    NSAlert,
+    NSApplication,
+    NSAppearanceNameAqua,
+    NSAppearanceNameDarkAqua,
+    NSImage,
+    NSStatusWindowLevel,
+)
+from Foundation import NSDistributedNotificationCenter, NSOperationQueue
 from PyObjCTools import AppHelper
 
 from meet_recorder import calendar, drive, meet_ingest, recorder, transcriber
@@ -13,10 +21,12 @@ from meet_recorder.config import load_config
 
 logger = logging.getLogger(__name__)
 
-IDLE_TITLE = '\U0001f3a4'
-RECORDING_TITLE = '\U0001f534'
-TRANSCRIBING_TITLE = '⏳'
-RECORDING_TRANSCRIBING_TITLE = '\U0001f534⏳'
+ASSET_DIR = os.path.join(os.path.dirname(__file__), 'assets')
+# Matches the canvas the icons were generated at (see assets/build script): fixed for every
+# state so switching between them never resizes the NSStatusItem and shifts neighboring
+# menu-bar icons ("falling").
+ICON_SIZE_PT = (24.0, 26.75)
+ICON_STATES = ('idle', 'recording', 'transcribing', 'recording_transcribing')
 
 RECOVERY_SCAN_DELAY_SECONDS = 1
 AUTORECORD_FAILURE_NOTIFY_THRESHOLD = 3
@@ -25,12 +35,16 @@ MEET_INGEST_FAILURE_NOTIFY_THRESHOLD = 3
 
 class MenubarApp(rumps.App):
     def __init__(self):
-        super().__init__('MeetRecorder', title=IDLE_TITLE, quit_button=None)
+        super().__init__('MeetRecorder', quit_button=None)
 
         self.is_recording = False
         self.active_transcriptions = 0
         self._transcriptions_lock = threading.Lock()
         self._start_in_progress = False
+
+        self._icons = self._load_icons()
+        self._dark_mode = self._detect_dark_mode()
+        self._refresh_icon()
 
         self.start_item = rumps.MenuItem('Iniciar', callback=self.on_start)
         self.stop_item = rumps.MenuItem('Parar', callback=None)
@@ -80,7 +94,37 @@ class MenubarApp(rumps.App):
                 f'look-back {self.config.meet_transcripts.lookback_hours}h'
             )
 
+    def _load_icons(self):
+        icons = {}
+        for state in ICON_STATES:
+            for dark, suffix in ((False, ''), (True, '_dark')):
+                path = os.path.join(ASSET_DIR, f'{state}{suffix}.png')
+                icons[(state, dark)] = self._build_nsimage(path)
+        return icons
+
+    @staticmethod
+    def _build_nsimage(path):
+        image = NSImage.alloc().initByReferencingFile_(path)
+        image.setScalesWhenResized_(True)
+        image.setSize_(ICON_SIZE_PT)
+        return image
+
+    @staticmethod
+    def _detect_dark_mode():
+        appearance = NSApplication.sharedApplication().effectiveAppearance()
+        best = appearance.bestMatchFromAppearancesWithNames_([NSAppearanceNameDarkAqua, NSAppearanceNameAqua])
+        return best == NSAppearanceNameDarkAqua
+
+    def _on_theme_changed(self, notification):
+        dark = self._detect_dark_mode()
+        if dark != self._dark_mode:
+            self._dark_mode = dark
+            self._refresh_icon()
+
     def run(self, **options):
+        NSDistributedNotificationCenter.defaultCenter().addObserverForName_object_queue_usingBlock_(
+            'AppleInterfaceThemeChangedNotification', None, NSOperationQueue.mainQueue(), self._on_theme_changed,
+        )
         self._recovery_timer.start()
         if self._calendar_poll_timer is not None:
             self._calendar_poll_timer.start()
@@ -364,26 +408,36 @@ class MenubarApp(rumps.App):
         # read-modify-write and not atomic, so serialize under a lock.
         with self._transcriptions_lock:
             self.active_transcriptions += 1
-        self._refresh_title()
+        self._refresh_icon()
 
     def _end_transcription(self):
         with self._transcriptions_lock:
             self.active_transcriptions -= 1
-        self._refresh_title()
+        self._refresh_icon()
 
-    def _refresh_title(self):
+    def _current_state_name(self):
         if self.is_recording and self.active_transcriptions > 0:
-            self.title = RECORDING_TRANSCRIBING_TITLE
+            return 'recording_transcribing'
         elif self.is_recording:
-            self.title = RECORDING_TITLE
+            return 'recording'
         elif self.active_transcriptions > 0:
-            self.title = TRANSCRIBING_TITLE
+            return 'transcribing'
         else:
-            self.title = IDLE_TITLE
+            return 'idle'
+
+    def _refresh_icon(self):
+        # Bypass the rumps `icon` property: it forces a fixed 20x20pt size via
+        # _nsimage_from_file, which would squash our custom-aspect-ratio icons. Setting the
+        # private _icon_nsimage attribute directly (same one that property assigns to) and
+        # nudging the status item is the same mechanism rumps uses internally.
+        self._icon_nsimage = self._icons[(self._current_state_name(), self._dark_mode)]
+        nsapp = getattr(self, '_nsapp', None)
+        if nsapp is not None:
+            nsapp.setStatusBarIcon()
 
     def _set_recording_state(self, recording):
         self.is_recording = recording
-        self._refresh_title()
+        self._refresh_icon()
         self.start_item.set_callback(None if recording else self.on_start)
         self.stop_item.set_callback(self.on_stop if recording else None)
         self.stop_no_transcribe_item.set_callback(self.on_stop_no_transcribe if recording else None)
