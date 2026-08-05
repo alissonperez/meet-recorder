@@ -61,6 +61,25 @@ def handler_calendar_auth(account):
 
 
 @handler
+def handler_ingest_transcript(url, account, title=None):
+    '''Ingest a standalone Google Doc transcript from a Drive link (e.g. an interview you
+    didn't attend) into the standard transcript + summary pipeline'''
+
+    ic('ingesting transcript doc', url, account, title)
+
+    config = load_config()
+
+    try:
+        result = transcriber.ingest_doc(url, config, account, title=title)
+    except drive.DriveError as e:
+        logger.error(str(e))
+        return
+
+    logger.info(f'Transcript saved to {ccolor.green(result["transcript_path"])}')
+    logger.info(f'Summary saved to {ccolor.green(result["summary_path"])}')
+
+
+@handler
 async def handler_meet_transcripts():
     '''Ingest Google Meet transcripts + Gemini notes from past calendar events into transcript + summary files'''
 

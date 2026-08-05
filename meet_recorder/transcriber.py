@@ -13,7 +13,7 @@ import httpx
 from openai import OpenAI
 from slugify import slugify
 
-from meet_recorder import calendar
+from meet_recorder import calendar, drive
 from meet_recorder.config import load_config
 
 logger = logging.getLogger(__name__)
@@ -312,6 +312,35 @@ async def transcribe(wav_path, config=None):
     finally:
         if tmp_dir and os.path.isdir(tmp_dir):
             shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def ingest_doc(url, config, account, title=None):
+    '''Export a standalone Google Doc transcript (not tied to a calendar occurrence) and run it
+    through the standard summary/output pipeline. For transcripts of meetings the user did not
+    attend (e.g. an interview), where a title can't be inferred from a calendar event.
+
+    Raises TranscriptionError if `url` is not a recognizable Google Doc link, and
+    drive.DriveScopeError/DriveAccessError on export failures.'''
+    doc_id = drive.doc_id_from_url(url)
+    if doc_id is None:
+        raise TranscriptionError(f'Could not extract a Google Doc id from URL: {url}')
+
+    transcript_text = drive.export_doc_markdown(account, doc_id)
+
+    summary_text = _generate_summary(transcript_text, config)
+    resolved_title = title or _generate_title(summary_text, config)
+    timestamp = datetime.now()
+
+    transcript_path = _write_markdown(
+        config.transcript_dir, timestamp, _build_base_filename(timestamp, resolved_title),
+        _transcript_markdown(resolved_title, transcript_text),
+    )
+    summary_path = _write_markdown(
+        config.summary_dir, timestamp, _build_base_filename(timestamp, resolved_title, suffix='RESUMO'),
+        _summary_markdown(resolved_title, summary_text),
+    )
+
+    return {'transcript_path': transcript_path, 'summary_path': summary_path}
 
 
 def write_meet_output(event, transcript_text, config, gemini_context=None):

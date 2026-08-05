@@ -249,6 +249,61 @@ def test_write_meet_output_overwrites_existing_file(monkeypatch, tmp_path):
     assert 'second body' in open(second['transcript_path']).read()
 
 
+def _ingest_config(tmp_path):
+    return Mock(
+        transcript_dir=str(tmp_path / 'transcripts'),
+        summary_dir=str(tmp_path / 'summaries'),
+        summary_model='m',
+        summary_prompt='default prompt',
+    )
+
+
+def test_ingest_doc_raises_when_url_is_not_a_doc_link(tmp_path):
+    try:
+        transcriber.ingest_doc('https://drive.google.com/file/d/abc123/view', _ingest_config(tmp_path), 'acc')
+        assert False, 'expected TranscriptionError'
+    except transcriber.TranscriptionError as e:
+        assert 'Could not extract' in str(e)
+
+
+def test_ingest_doc_exports_and_writes_files_with_explicit_title(monkeypatch, tmp_path):
+    captured = {}
+    monkeypatch.setattr(
+        transcriber.drive, 'export_doc_markdown',
+        lambda account, doc_id: captured.update(account=account, doc_id=doc_id) or 'transcript body',
+    )
+    monkeypatch.setattr(transcriber, '_generate_summary', lambda t, c: 'summary body')
+    gen_title = Mock()
+    monkeypatch.setattr(transcriber, '_generate_title', gen_title)
+
+    url = 'https://docs.google.com/document/d/doc123/edit'
+    result = transcriber.ingest_doc(url, _ingest_config(tmp_path), 'work-account', title='Interview With X')
+
+    assert captured == {'account': 'work-account', 'doc_id': 'doc123'}
+    gen_title.assert_not_called()
+
+    transcript = open(result['transcript_path']).read()
+    assert 'title: "Interview With X"' in transcript
+    assert 'transcript body' in transcript
+    assert 'calendar:' not in transcript
+
+    summary = open(result['summary_path']).read()
+    assert 'title: "Interview With X"' in summary
+    assert 'summary body' in summary
+
+
+def test_ingest_doc_falls_back_to_llm_title_when_not_given(monkeypatch, tmp_path):
+    monkeypatch.setattr(transcriber.drive, 'export_doc_markdown', lambda account, doc_id: 'transcript body')
+    monkeypatch.setattr(transcriber, '_generate_summary', lambda t, c: 'summary body')
+    monkeypatch.setattr(transcriber, '_generate_title', Mock(return_value='LLM Title'))
+
+    url = 'https://docs.google.com/document/d/doc123/edit'
+    result = transcriber.ingest_doc(url, _ingest_config(tmp_path), 'work-account')
+
+    transcript = open(result['transcript_path']).read()
+    assert 'title: "LLM Title"' in transcript
+
+
 def _chunk_config():
     return Mock(
         transcription_model='stt',
