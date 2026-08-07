@@ -128,16 +128,19 @@ This launches a menu bar icon with a submenu:
   one or more transcriptions are still running in the background, a confirmation alert is shown
   first (see [Transcription](#transcription) below); declining leaves the app running.
 
-The icon reflects two independent, combinable states — recording and transcribing:
+The icon reflects two independent, combinable states — recording and transcribing — via colored
+badges overlaid on the mic glyph:
 
 | Recording | Transcribing | Icon |
 |---|---|---|
-| No | No | 🎤 |
-| Yes | No | 🔴 |
-| No | Yes | ⏳ |
-| Yes | Yes | 🔴⏳ |
+| No | No | plain mic |
+| Yes | No | mic + red badge |
+| No | Yes | mic + orange badge |
+| Yes | Yes | mic + red badge + orange badge |
 
-No count of in-progress transcriptions is shown, only presence/absence of each state.
+No count of in-progress transcriptions is shown, only presence/absence of each state. The icon
+is a fixed-size custom image (`meet_recorder/assets/*.png`) rather than a text title, so
+switching between states never resizes the status item or shifts neighboring menu-bar icons.
 
 It uses the same capture logic as `python main.py record` (requires the
 [ScreenCaptureKit setup](#audio-capture-setup-screencapturekit) above), and adds:
