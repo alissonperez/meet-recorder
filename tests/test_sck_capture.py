@@ -200,3 +200,34 @@ def test_delegate_ignores_non_audio_buffers(sck_mocks):
     delegate.stream_didOutputSampleBuffer_ofType_(sck_mocks['stream'], object(), 'some-other-type')
 
     assert received == []
+
+
+def test_stream_did_stop_with_error_marks_handle_inactive(sck_mocks):
+    sck_capture.start(lambda chunk: None, sample_rate=16000)
+    delegate = sck_mocks['stream'].addStreamOutput_type_sampleHandlerQueue_error_.call_args[0][0]
+    handle = delegate.handle
+
+    delegate.stream_didStopWithError_(sck_mocks['stream'], 'connection interruption')
+
+    assert handle.stopped_unexpectedly == 'connection interruption'
+    assert handle._active is False
+
+
+def test_stop_is_a_noop_when_handle_already_inactive(sck_mocks):
+    handle = sck_capture.start(lambda chunk: None, sample_rate=16000)
+    handle._active = False
+
+    sck_capture.stop(handle)
+
+    sck_mocks['stream'].stopCaptureWithCompletionHandler_.assert_not_called()
+
+
+def test_stream_did_stop_with_no_error_is_a_noop(sck_mocks):
+    sck_capture.start(lambda chunk: None, sample_rate=16000)
+    delegate = sck_mocks['stream'].addStreamOutput_type_sampleHandlerQueue_error_.call_args[0][0]
+    handle = delegate.handle
+
+    delegate.stream_didStopWithError_(sck_mocks['stream'], None)
+
+    assert handle.stopped_unexpectedly is None
+    assert handle._active is True
