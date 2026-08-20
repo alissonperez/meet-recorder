@@ -427,6 +427,43 @@ def test_stop_recording_still_stops_writers_and_merges_when_mic_stream_stop_rais
     assert recorder._state['sys_handle'] is None
 
 
+def test_stop_recording_warns_when_sys_handle_stopped_unexpectedly(tmp_path, monkeypatch, caplog):
+    monkeypatch.setenv('RECORDINGS_DIR', str(tmp_path))
+    monkeypatch.setattr(recorder.sd.default, 'device', (0, 0))
+    monkeypatch.setattr(recorder.sd, 'InputStream', MagicMock(return_value=MagicMock()))
+
+    fake_handle = MagicMock()
+    fake_handle.stopped_unexpectedly = 'connection interruption'
+    monkeypatch.setattr(recorder.sck_capture, 'start', MagicMock(return_value=fake_handle))
+    monkeypatch.setattr(recorder.sck_capture, 'stop', MagicMock())
+
+    recorder.start_recording()
+
+    with caplog.at_level('WARNING'):
+        path = recorder.stop_recording_and_save()
+
+    assert path in caplog.text
+    assert 'connection interruption' in caplog.text
+
+
+def test_stop_recording_does_not_warn_on_normal_stop(tmp_path, monkeypatch, caplog):
+    monkeypatch.setenv('RECORDINGS_DIR', str(tmp_path))
+    monkeypatch.setattr(recorder.sd.default, 'device', (0, 0))
+    monkeypatch.setattr(recorder.sd, 'InputStream', MagicMock(return_value=MagicMock()))
+
+    fake_handle = MagicMock()
+    fake_handle.stopped_unexpectedly = None
+    monkeypatch.setattr(recorder.sck_capture, 'start', MagicMock(return_value=fake_handle))
+    monkeypatch.setattr(recorder.sck_capture, 'stop', MagicMock())
+
+    recorder.start_recording()
+
+    with caplog.at_level('WARNING'):
+        recorder.stop_recording_and_save()
+
+    assert caplog.text == ''
+
+
 def test_discard_recording_raises_when_no_recording_in_progress():
     with pytest.raises(RuntimeError, match='No recording is in progress'):
         recorder.discard_recording()
