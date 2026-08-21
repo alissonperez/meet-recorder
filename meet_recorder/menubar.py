@@ -5,7 +5,8 @@ import threading
 from datetime import datetime
 
 import rumps
-from AppKit import NSAlert, NSApplication, NSImage, NSStatusWindowLevel
+from AppKit import NSAlert, NSApplication, NSImage, NSPopUpButton, NSStatusWindowLevel
+from Foundation import NSMakeRect
 from PyObjCTools import AppHelper
 
 from meet_recorder import calendar, drive, meet_ingest, recorder, transcriber
@@ -23,6 +24,8 @@ ICON_STATES = ('idle', 'recording', 'transcribing', 'recording_transcribing')
 RECOVERY_SCAN_DELAY_SECONDS = 1
 AUTORECORD_FAILURE_NOTIFY_THRESHOLD = 3
 MEET_INGEST_FAILURE_NOTIFY_THRESHOLD = 3
+# Icon blink interval while the microphone needs attention (silent, or paused for a switch).
+MIC_ATTENTION_BLINK_INTERVAL_SECONDS = 0.6
 
 
 class MenubarApp(rumps.App):
@@ -34,6 +37,11 @@ class MenubarApp(rumps.App):
         self._transcriptions_lock = threading.Lock()
         self._start_in_progress = False
 
+        self._mic_attention_reasons = set()
+        self._blink_phase = False
+        self._blink_timer = rumps.Timer(self._on_blink_tick, MIC_ATTENTION_BLINK_INTERVAL_SECONDS)
+        self._mic_switch_in_progress = False
+
         self._icons = self._load_icons()
         self._refresh_icon()
 
@@ -41,13 +49,16 @@ class MenubarApp(rumps.App):
         self.stop_item = rumps.MenuItem('Parar', callback=None)
         self.stop_no_transcribe_item = rumps.MenuItem('Parar e não transcrever', callback=None)
         self.discard_item = rumps.MenuItem('Descartar', callback=None)
+        self.switch_mic_item = rumps.MenuItem('Trocar microfone…', callback=None)
         self.quit_item = rumps.MenuItem('Sair', callback=self.on_quit)
 
         self.menu = [
-            self.start_item, self.stop_item, self.stop_no_transcribe_item, self.discard_item, self.quit_item,
+            self.start_item, self.stop_item, self.stop_no_transcribe_item, self.discard_item,
+            self.switch_mic_item, self.quit_item,
         ]
 
         recorder.on_silence_warning = self.on_silence_warning
+        recorder.on_silence_recovered = self.on_silence_recovered
 
         self._recovery_timer = rumps.Timer(self._run_recovery_scan, RECOVERY_SCAN_DELAY_SECONDS)
 
@@ -388,13 +399,36 @@ class MenubarApp(rumps.App):
 
     def _current_state_name(self):
         if self.is_recording and self.active_transcriptions > 0:
-            return 'recording_transcribing'
+            base = 'recording_transcribing'
         elif self.is_recording:
-            return 'recording'
+            base = 'recording'
         elif self.active_transcriptions > 0:
-            return 'transcribing'
+            base = 'transcribing'
         else:
+            base = 'idle'
+
+        if self._mic_attention_reasons and self._blink_phase:
             return 'idle'
+        return base
+
+    def _on_blink_tick(self, sender):
+        self._blink_phase = not self._blink_phase
+        self._refresh_icon()
+
+    def _add_mic_attention_reason(self, reason):
+        was_active = bool(self._mic_attention_reasons)
+        self._mic_attention_reasons.add(reason)
+        if not was_active:
+            self._blink_phase = False
+            self._blink_timer.start()
+            self._refresh_icon()
+
+    def _clear_mic_attention_reason(self, reason):
+        self._mic_attention_reasons.discard(reason)
+        if not self._mic_attention_reasons:
+            self._blink_timer.stop()
+            self._blink_phase = False
+            self._refresh_icon()
 
     def _refresh_icon(self):
         # Bypass the rumps `icon` property: it forces a fixed 20x20pt size via
@@ -413,6 +447,13 @@ class MenubarApp(rumps.App):
         self.stop_item.set_callback(self.on_stop if recording else None)
         self.stop_no_transcribe_item.set_callback(self.on_stop_no_transcribe if recording else None)
         self.discard_item.set_callback(self.on_discard if recording else None)
+        self.switch_mic_item.set_callback(self.on_switch_mic if recording else None)
+        if not recording:
+            self._mic_switch_in_progress = False
+            if self._mic_attention_reasons:
+                self._mic_attention_reasons.clear()
+                self._blink_timer.stop()
+            self._blink_phase = False
 
     def _start_recording_async(self, on_failure=None):
         # recorder.start_recording() can block for a long time (or hang) on a stale
@@ -488,11 +529,128 @@ class MenubarApp(rumps.App):
         finally:
             self._end_transcription()
 
-    def on_silence_warning(self):
-        self._notify(
-            'System audio may be silent',
-            'Check that system output is routed to the Multi-Output Device',
+    def on_silence_warning(self, channel):
+        # recorder's silence monitor calls this from its own background thread; both branches
+        # below touch AppKit (the blink timer, the status bar icon), which - unlike the plain
+        # rumps.notification() call in _notify() - must run on the main thread. Marshal instead
+        # of executing inline, following the _show_alert_on_main pattern.
+        AppHelper.callAfter(self._handle_silence_warning, channel)
+
+    def _handle_silence_warning(self, channel):
+        if channel == 'mic':
+            self._add_mic_attention_reason('silence')
+            self._notify(
+                'Microphone may be silent',
+                'Try switching the microphone input device from the menu bar.',
+            )
+        else:
+            self._notify(
+                'System audio may be silent',
+                'Check that system output is routed to the Multi-Output Device',
+            )
+
+    def on_silence_recovered(self, channel):
+        AppHelper.callAfter(self._handle_silence_recovered, channel)
+
+    def _handle_silence_recovered(self, channel):
+        if channel == 'mic':
+            self._clear_mic_attention_reason('silence')
+
+    def _show_mic_selection_dialog(self, devices):
+        if not devices:
+            self._show_alert(
+                title='Nenhum microfone encontrado', message='Nenhum dispositivo de entrada disponível.', ok='OK',
+            )
+            self._resume_mic_async(None)
+            return
+
+        chosen_device = self._run_mic_selection_alert(devices)
+        self._resume_mic_async(chosen_device)
+
+    def _run_mic_selection_alert(self, devices):
+        # Isolated from _show_mic_selection_dialog so tests can stub the AppKit interaction
+        # without touching NSAlert/NSPopUpButton directly (PyObjC-bridged classes cannot be
+        # monkeypatched safely). Returns the selected device index, or None if cancelled.
+        NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+
+        popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(0, 0, 300, 24), False)
+        for device in devices:
+            popup.addItemWithTitle_(device['name'])
+
+        alert = NSAlert.alertWithMessageText_defaultButton_alternateButton_otherButton_informativeTextWithFormat_(
+            'Trocar microfone', 'Selecionar', 'Cancelar', None, '',
         )
+        alert.setAccessoryView_(popup)
+        alert.window().setLevel_(NSStatusWindowLevel)
+        alert.window().orderFrontRegardless()
+
+        response = alert.runModal()
+
+        if response == 1:
+            return devices[popup.indexOfSelectedItem()]['index']
+        return None
+
+    def _resume_mic_async(self, device):
+        # Terminal path: success or MicResumeFallbackError both leave the microphone capturing
+        # again, and a plain Exception here means resume_mic()'s own internal fallback also
+        # failed - there is no further device left to retry, so report and stop rather than
+        # calling back into this method again (which could otherwise loop forever).
+        def worker():
+            try:
+                recorder.resume_mic(device)
+            except recorder.MicResumeFallbackError as e:
+                AppHelper.callAfter(self._on_mic_switch_fallback, e)
+                return
+            except Exception as e:
+                AppHelper.callAfter(self._on_mic_switch_terminal_failure, e)
+                return
+            AppHelper.callAfter(self._on_mic_switch_success)
+
+        thread = threading.Thread(target=worker, daemon=True)
+        thread.start()
+
+    def _on_mic_switch_success(self):
+        self._mic_switch_in_progress = False
+        self.switch_mic_item.set_callback(self.on_switch_mic if self.is_recording else None)
+        self._clear_mic_attention_reason('paused')
+
+    def _on_mic_switch_fallback(self, error):
+        self._on_mic_switch_success()
+        self._show_alert_on_main(title='Falha ao trocar microfone', message=str(error))
+
+    def _on_mic_switch_terminal_failure(self, error):
+        logger.error(f'Failed to resume microphone: {error}')
+        self._mic_switch_in_progress = False
+        self.switch_mic_item.set_callback(self.on_switch_mic if self.is_recording else None)
+        self._clear_mic_attention_reason('paused')
+        self._show_alert_on_main(title='Microfone indisponível', message=str(error))
+
+    def _on_mic_switch_setup_failure(self, error):
+        logger.error(f'Microphone switch failed: {error}')
+        # Never leave the recording without a microphone because pausing or enumeration failed:
+        # fall back to whichever device was in use before the attempt.
+        self._resume_mic_async(None)
+        self._show_alert_on_main(title='Falha ao trocar microfone', message=str(error))
+
+    def on_switch_mic(self, _):
+        if self._mic_switch_in_progress:
+            return
+
+        self._mic_switch_in_progress = True
+        self.switch_mic_item.set_callback(None)
+        self._add_mic_attention_reason('paused')
+
+        def worker():
+            try:
+                recorder.pause_mic()
+                devices = recorder.list_input_devices()
+            except Exception as e:
+                AppHelper.callAfter(self._on_mic_switch_setup_failure, e)
+                return
+            AppHelper.callAfter(self._show_mic_selection_dialog, devices)
+
+        thread = threading.Thread(target=worker, daemon=True)
+        thread.start()
 
     def on_quit(self, _):
         if self.is_recording:

@@ -88,6 +88,7 @@ def app(monkeypatch):
     instance = menubar_module.MenubarApp()
     instance._show_alert = MagicMock()
     instance._notify = MagicMock()
+    instance._blink_timer = MagicMock()
     return instance
 
 
@@ -546,3 +547,215 @@ def test_on_discard_cancel_leaves_recording_running(app, monkeypatch):
     discard_recording.assert_not_called()
     assert app.is_recording is True
     assert app.discard_item.callback == app.on_discard
+
+
+# --- Microphone-attention icon blink ------------------------------------------
+
+def test_blink_toggles_state_name_while_flag_is_set(app):
+    app._set_recording_state(True)
+    assert app._current_state_name() == 'recording'
+
+    app._add_mic_attention_reason('silence')
+    app._blink_timer.start.assert_called_once()
+    assert app._current_state_name() == 'recording'
+
+    app._on_blink_tick(None)
+    assert app._current_state_name() == 'idle'
+
+    app._on_blink_tick(None)
+    assert app._current_state_name() == 'recording'
+
+
+def test_blink_applies_to_recording_transcribing_state(app):
+    app._set_recording_state(True)
+    app._begin_transcription()
+    assert app._current_state_name() == 'recording_transcribing'
+
+    app._add_mic_attention_reason('paused')
+    app._blink_phase = True
+
+    assert app._current_state_name() == 'idle'
+
+
+def test_blink_stops_on_recovery(app):
+    app._set_recording_state(True)
+    app._add_mic_attention_reason('silence')
+    app._blink_phase = True
+    assert app._current_state_name() == 'idle'
+
+    app._clear_mic_attention_reason('silence')
+
+    app._blink_timer.stop.assert_called_once()
+    assert app._current_state_name() == 'recording'
+
+
+def test_blink_reasons_do_not_clear_until_all_cleared(app):
+    app._set_recording_state(True)
+    app._add_mic_attention_reason('silence')
+    app._add_mic_attention_reason('paused')
+
+    app._clear_mic_attention_reason('silence')
+    app._blink_timer.stop.assert_not_called()
+
+    app._clear_mic_attention_reason('paused')
+    app._blink_timer.stop.assert_called_once()
+
+
+def test_steady_states_unchanged_when_flag_clear(app):
+    assert app._current_state_name() == 'idle'
+    app._set_recording_state(True)
+    assert app._current_state_name() == 'recording'
+    app._begin_transcription()
+    assert app._current_state_name() == 'recording_transcribing'
+    app._end_transcription()
+    app._set_recording_state(False)
+    assert app._current_state_name() == 'idle'
+
+
+def test_on_silence_warning_mic_channel_sets_attention_and_notifies(app):
+    app._set_recording_state(True)
+
+    app.on_silence_warning('mic')
+
+    assert 'silence' in app._mic_attention_reasons
+    app._notify.assert_called_once()
+    assert 'Microphone' in app._notify.call_args.args[0]
+
+
+def test_on_silence_warning_sys_channel_does_not_set_attention(app):
+    app._set_recording_state(True)
+
+    app.on_silence_warning('sys')
+
+    assert 'silence' not in app._mic_attention_reasons
+    app._notify.assert_called_once()
+    assert 'System audio' in app._notify.call_args.args[0]
+
+
+def test_on_silence_recovered_clears_mic_attention(app):
+    app._set_recording_state(True)
+    app._add_mic_attention_reason('silence')
+
+    app.on_silence_recovered('mic')
+
+    assert 'silence' not in app._mic_attention_reasons
+
+
+def test_on_silence_warning_marshals_to_main_thread(app, monkeypatch):
+    # The recorder's silence monitor calls this from its own background thread; the blink
+    # timer and status bar icon it touches must be driven from the main thread, so this must
+    # not run inline on whatever thread calls it.
+    call_after = MagicMock()
+    monkeypatch.setattr(menubar_module.AppHelper, 'callAfter', call_after)
+
+    app.on_silence_warning('mic')
+
+    app._notify.assert_not_called()
+    call_after.assert_called_once_with(app._handle_silence_warning, 'mic')
+
+
+def test_on_silence_recovered_marshals_to_main_thread(app, monkeypatch):
+    call_after = MagicMock()
+    monkeypatch.setattr(menubar_module.AppHelper, 'callAfter', call_after)
+
+    app.on_silence_recovered('mic')
+
+    call_after.assert_called_once_with(app._handle_silence_recovered, 'mic')
+
+
+# --- Switch microphone from the menu bar --------------------------------------
+
+def test_switch_mic_item_enablement_follows_recording_state(app):
+    assert app.switch_mic_item.callback is None
+
+    app._set_recording_state(True)
+    assert app.switch_mic_item.callback == app.on_switch_mic
+
+    app._set_recording_state(False)
+    assert app.switch_mic_item.callback is None
+
+
+def test_on_switch_mic_pauses_then_builds_dialog_after_pause(app, monkeypatch):
+    app._set_recording_state(True)
+    call_order = []
+    monkeypatch.setattr(menubar_module.recorder, 'pause_mic', lambda: call_order.append('pause'))
+    monkeypatch.setattr(
+        menubar_module.recorder, 'list_input_devices',
+        lambda: call_order.append('enumerate') or [{'index': 0, 'name': 'Built-in Mic'}],
+    )
+    dialog = MagicMock()
+    monkeypatch.setattr(menubar_module.AppHelper, 'callAfter', lambda func, *a, **k: func(*a, **k))
+    monkeypatch.setattr(menubar_module.MenubarApp, '_show_mic_selection_dialog', dialog)
+
+    app.on_switch_mic(None)
+
+    assert call_order == ['pause', 'enumerate']
+    dialog.assert_called_once()
+    devices_arg = dialog.call_args.args[0]
+    assert devices_arg == [{'index': 0, 'name': 'Built-in Mic'}]
+
+
+def test_switch_mic_cancellation_resumes_capture(app, monkeypatch):
+    app._set_recording_state(True)
+    resume_mic = MagicMock(return_value=None)
+    monkeypatch.setattr(menubar_module.recorder, 'resume_mic', resume_mic)
+    monkeypatch.setattr(menubar_module.AppHelper, 'callAfter', lambda func, *a, **k: func(*a, **k))
+    monkeypatch.setattr(menubar_module.MenubarApp, '_run_mic_selection_alert', lambda self, devices: None)
+
+    app._show_mic_selection_dialog([{'index': 0, 'name': 'Built-in Mic'}])
+
+    resume_mic.assert_called_once_with(None)
+    assert app.switch_mic_item.callback == app.on_switch_mic
+    assert 'paused' not in app._mic_attention_reasons
+
+
+def test_switch_mic_selection_resumes_on_chosen_device(app, monkeypatch):
+    app._set_recording_state(True)
+    resume_mic = MagicMock(return_value=None)
+    monkeypatch.setattr(menubar_module.recorder, 'resume_mic', resume_mic)
+    monkeypatch.setattr(menubar_module.AppHelper, 'callAfter', lambda func, *a, **k: func(*a, **k))
+    monkeypatch.setattr(menubar_module.MenubarApp, '_run_mic_selection_alert', lambda self, devices: 2)
+
+    app._show_mic_selection_dialog([{'index': 2, 'name': 'AirPods'}])
+
+    resume_mic.assert_called_once_with(2)
+
+
+def test_switch_mic_empty_device_list_resumes_previous(app, monkeypatch):
+    app._set_recording_state(True)
+    resume_mic = MagicMock(return_value=None)
+    monkeypatch.setattr(menubar_module.recorder, 'resume_mic', resume_mic)
+    monkeypatch.setattr(menubar_module.AppHelper, 'callAfter', lambda func, *a, **k: func(*a, **k))
+
+    app._show_mic_selection_dialog([])
+
+    app._show_alert.assert_called_once()
+    resume_mic.assert_called_once_with(None)
+
+
+def test_switch_mic_failure_shows_alert_without_stopping_recording(app, monkeypatch):
+    app._set_recording_state(True)
+    monkeypatch.setattr(
+        menubar_module.recorder, 'resume_mic',
+        MagicMock(side_effect=RuntimeError('unsupported sample rate')),
+    )
+    call_after = MagicMock(side_effect=lambda func, *a, **k: func(*a, **k))
+    monkeypatch.setattr(menubar_module.AppHelper, 'callAfter', call_after)
+
+    app._resume_mic_async(3)
+
+    app._show_alert.assert_called_once()
+    assert app.is_recording is True
+
+
+def test_switch_mic_setup_failure_falls_back_and_shows_alert(app, monkeypatch):
+    app._set_recording_state(True)
+    monkeypatch.setattr(menubar_module.recorder, 'pause_mic', MagicMock(side_effect=RuntimeError('no permission')))
+    monkeypatch.setattr(menubar_module.recorder, 'resume_mic', MagicMock(return_value=1))
+    monkeypatch.setattr(menubar_module.AppHelper, 'callAfter', lambda func, *a, **k: func(*a, **k))
+
+    app.on_switch_mic(None)
+
+    app._show_alert.assert_called_once()
+    assert app.is_recording is True
+    assert app.switch_mic_item.callback == app.on_switch_mic

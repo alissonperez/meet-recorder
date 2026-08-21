@@ -1,64 +1,4 @@
-# audio-capture Specification
-
-## Purpose
-TBD - created by archiving change capture-audio-blackhole. Update Purpose after archive.
-
-## Requirements
-
-### Requirement: System-audio capture prerequisites
-The system SHALL capture system audio via ScreenCaptureKit, which requires macOS 13 or later and the macOS Screen Recording permission granted to the process that runs the application, and SHALL NOT require any virtual audio driver (such as BlackHole), any Multi-Output Device configuration, or the `SwitchAudioSource` binary.
-
-#### Scenario: Recording works without BlackHole installed
-- **WHEN** a recording is started on a machine that has Screen Recording permission granted but no BlackHole driver, no Multi-Output Device, and no `SwitchAudioSource` binary installed
-- **THEN** the recording starts successfully and captures both microphone and system audio
-
-#### Scenario: Missing Screen Recording permission produces a clear failure signal
-- **WHEN** a recording is started while the running process lacks Screen Recording permission
-- **THEN** the system either raises a clear error at start, or — if the stream starts but delivers no audio buffers — emits a warning that points at the Screen Recording permission, rather than failing silently
-
-### Requirement: System volume remains user-controllable during recording
-The system SHALL leave the macOS output-device configuration and routing untouched while recording, so that the user can adjust system volume normally for the entire duration of a recording.
-
-#### Scenario: Volume adjusted mid-recording
-- **WHEN** the user changes the system output volume while a recording is in progress
-- **THEN** the audible output volume changes normally, the recording continues uninterrupted, and the captured system-audio signal is unaffected by the volume change being possible
-
-### Requirement: Dual-source stereo recording
-The system SHALL simultaneously capture audio from the system's default microphone input (via the audio input API) and from the system-audio output (via a ScreenCaptureKit stream with audio capture enabled), converting the system-audio stream's Float32 interleaved buffers to mono, writing each source incrementally to its own temporary file on disk during recording, and SHALL merge them at stop time into a single stereo WAV file where channel 0 contains the microphone signal and channel 1 contains the system-audio signal, without mixing or summing the two signals.
-
-#### Scenario: Recording captures both sources into one file
-- **WHEN** a recording is started and later stopped after audio has played through the system and the user has spoken into the microphone
-- **THEN** a single `.wav` file is produced with 2 channels, where channel 0 contains the microphone audio and channel 1 contains the system audio
-
-#### Scenario: Recording quality
-- **WHEN** a recording is started
-- **THEN** audio is captured at a 16kHz sample rate on both channels
-
-#### Scenario: Multi-channel system audio is downmixed to mono
-- **WHEN** the ScreenCaptureKit stream delivers multi-channel (e.g. stereo) Float32 audio buffers
-- **THEN** the channels are downmixed into a single mono signal before being written to the system-audio temporary file
-
-### Requirement: Bounded-memory incremental capture
-The system SHALL write captured audio frames for each source (microphone, system-audio) to disk incrementally during recording, rather than accumulating the full recording in memory, so that memory usage during capture does not grow proportionally with recording duration.
-
-#### Scenario: Memory stays bounded during a long recording
-- **WHEN** a recording runs continuously for an extended duration (e.g. two hours)
-- **THEN** the process's memory usage attributable to captured audio frames does not grow unbounded over the course of the recording, because frames are flushed to per-source temporary files on disk as they arrive instead of being retained in memory for the full session
-
-#### Scenario: Per-source temporary files exist during recording
-- **WHEN** a recording is in progress
-- **THEN** a temporary mono audio file for the microphone source and a temporary mono audio file for the system-audio source exist on disk and are being appended to, independent of when the recording is eventually stopped
-
-### Requirement: Bounded-memory stereo merge on stop
-The system SHALL produce the final stereo WAV file by reading the two per-source temporary files and writing the interleaved stereo output in fixed-size blocks, without loading either full-length source file into memory at once.
-
-#### Scenario: Stop-and-save merges without loading full recordings into memory
-- **WHEN** `stop_recording_and_save` is called after a long recording
-- **THEN** the final stereo `.wav` file is produced by block-wise reading of the two temporary mono files and block-wise writing of the interleaved result, and the two temporary files are removed after the merge completes successfully
-
-#### Scenario: Shorter source truncates the merge
-- **WHEN** the two per-source temporary files differ in length (e.g. one source stopped receiving frames slightly earlier than the other)
-- **THEN** the final stereo file's length is truncated to the length of the shorter of the two sources, consistent with existing dual-source recording behavior
+## MODIFIED Requirements
 
 ### Requirement: System-audio silence warning
 The system SHALL monitor the RMS signal level of the system-audio (ScreenCaptureKit) channel while recording, using a bounded rolling buffer that covers only the most recent silence-detection window rather than the full recording history, and SHALL emit a warning if that channel remains silent (RMS at or near zero) for a sustained period, pointing the user at the Screen Recording permission as the likely cause, without stopping the recording. The system SHALL additionally report when a previously warned channel returns to a non-silent level, so a consumer of the warning can clear any alert state it raised.
@@ -78,6 +18,8 @@ The system SHALL monitor the RMS signal level of the system-audio (ScreenCapture
 #### Scenario: Recovery from silence is reported
 - **WHEN** a channel that previously triggered a sustained-silence warning returns to a non-trivial RMS level
 - **THEN** the system reports the recovery to the consumer of the silence warning, identifying the recovered channel, so any alert state raised for that channel can be cleared
+
+## ADDED Requirements
 
 ### Requirement: Microphone silence warning
 The system SHALL monitor the RMS signal level of the microphone channel while recording using the same bounded rolling-buffer mechanism used for the system-audio channel, and SHALL emit a warning if the microphone channel remains silent for a sustained period, identifying the microphone (rather than the Screen Recording permission) as the affected source and pointing the user at switching the microphone input device, without stopping the recording.
@@ -165,54 +107,3 @@ The system SHALL log the status flags reported by the audio library's microphone
 #### Scenario: Normal callbacks are not logged
 - **WHEN** the microphone input callback is invoked with an empty status value
 - **THEN** no status warning is logged
-
-### Requirement: Recording file output location
-The system SHALL save completed recordings as `.wav` files in the `~/MeetRecordings` directory, named using a timestamp of when the recording started, not when it was stopped or saved.
-
-#### Scenario: Recording saved with timestamped filename
-- **WHEN** a recording is stopped and saved
-- **THEN** the resulting file is written under `~/MeetRecordings/` with a filename derived from the recording's start timestamp (e.g. `2026-07-09_14-30.wav`)
-
-#### Scenario: Long recording keeps its start-time filename
-- **WHEN** a recording runs long enough that the wall-clock time at stop differs from the wall-clock time at start (e.g. by more than an hour, or across midnight)
-- **THEN** the saved filename still reflects the moment the recording started, not the moment it was stopped
-
-### Requirement: CLI test entrypoint for recording
-The system SHALL expose a CLI command that records for a caller-specified duration and saves the result, for manual end-to-end testing of the capture flow independent of any future UI.
-
-#### Scenario: Fixed-duration recording via CLI
-- **WHEN** the `record` CLI command is invoked with a duration of N seconds
-- **THEN** the system records for approximately N seconds, switching and restoring the output device as usual, and saves the resulting file to `~/MeetRecordings/`
-
-### Requirement: UI-agnostic capture module
-The system SHALL implement the recording start/stop/save/device-switching logic in a module with no dependency on any specific caller (CLI or otherwise), so it can be reused by future interfaces without modification.
-
-#### Scenario: Capture logic callable without the CLI handler
-- **WHEN** the recording start, stop-and-save, and device-switching functions are called directly (not through the `record` CLI command)
-- **THEN** they perform the full capture/switch/save behavior identically to when invoked via the CLI handler
-
-### Requirement: Microphone device list refreshed before capture starts
-The system SHALL refresh the underlying audio library's device list immediately before selecting and opening the default microphone input device for a recording, rather than relying on a device list cached since process/library startup, to reduce the chance of opening the input stream against a stale device reference.
-
-#### Scenario: Device list refreshed on every recording start
-- **WHEN** a recording is started (via the CLI or the menu bar app)
-- **THEN** the audio library's device list is refreshed before the default microphone device index is read and the input stream is opened
-
-#### Scenario: Refresh does not change behavior when the device list is already current
-- **WHEN** a recording is started and the system's audio devices have not changed since the last refresh
-- **THEN** the same default microphone device is selected and the recording starts normally, identical to behavior without the refresh
-
-### Requirement: Unexpected ScreenCaptureKit stream stop is detected and surfaced
-The system SHALL detect when the ScreenCaptureKit system-audio stream stops on its own during recording (i.e. not as a result of the application calling its own stop function), SHALL NOT attempt to send a redundant stop request to a stream that has already stopped, and SHALL emit a warning identifying the affected recording when such a recording is saved, so the resulting file is not reported as a clean, complete recording.
-
-#### Scenario: Unexpected stream stop marks the capture inactive without a duplicate stop error
-- **WHEN** the ScreenCaptureKit stream stops on its own during an in-progress recording (e.g. due to an application connection interruption)
-- **THEN** the system-audio capture is marked inactive as a result of that stop, and the subsequent call to stop capture for that recording does not attempt to stop the stream again and does not log a "stream already stopped" error
-
-#### Scenario: Saving a recording after an unexpected stop warns the user
-- **WHEN** a recording is stopped and saved after its ScreenCaptureKit stream had already stopped unexpectedly partway through
-- **THEN** the system emits a warning identifying the saved recording file as having ended early, in addition to completing the normal save
-
-#### Scenario: Normal stop is unaffected
-- **WHEN** a recording is stopped normally (the ScreenCaptureKit stream did not stop on its own beforehand)
-- **THEN** the stream is stopped via the standard stop request and no unexpected-stop warning is emitted
