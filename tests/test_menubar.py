@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -436,3 +437,134 @@ def test_on_discard_cancel_leaves_recording_running(app, monkeypatch):
     discard_recording.assert_not_called()
     assert app.is_recording is True
     assert app.discard_item.callback == app.on_discard
+
+
+# --- Deferred transcription retry -------------------------------------------
+
+@pytest.fixture
+def retry(monkeypatch, tmp_path):
+    '''Stub the transcription pipeline and layer-2 helper; track what each call did.'''
+    monkeypatch.setattr(menubar_module.asyncio, 'run', MagicMock())
+    monkeypatch.setattr(menubar_module.transcriber, 'transcribe', lambda path: None)
+
+    deferred = MagicMock(return_value=menubar_module.transcription_retry.ledger.LedgerEntry('deferred', 1))
+    monkeypatch.setattr(menubar_module.transcription_retry, 'defer', deferred)
+    marked_done = MagicMock()
+    monkeypatch.setattr(menubar_module.transcription_retry, 'mark_done', marked_done)
+    due = MagicMock(return_value=[])
+    monkeypatch.setattr(menubar_module.transcription_retry, 'due_paths', due)
+
+    return SimpleNamespace(
+        defer=deferred, mark_done=marked_done, due_paths=due,
+        run=menubar_module.asyncio.run, wav=str(tmp_path / 'rec.wav'),
+    )
+
+
+def _capture_threads(monkeypatch):
+    '''Collect the work a scan hands to background threads, to run it on demand.'''
+    started = []
+
+    def fake_thread(target, args=(), kwargs=None, daemon=None):
+        started.append(lambda: target(*args, **(kwargs or {})))
+        return SimpleNamespace(start=lambda: None)
+
+    monkeypatch.setattr(menubar_module.threading, 'Thread', fake_thread)
+    return started
+
+
+def _fail_transcription(monkeypatch, error=RuntimeError('boom')):
+    def fail(_coro):
+        raise error
+
+    monkeypatch.setattr(menubar_module.asyncio, 'run', fail)
+    return error
+
+
+def test_failed_transcription_defers_without_notifying(app, retry, monkeypatch):
+    _fail_transcription(monkeypatch)
+
+    app._transcribe_in_background(retry.wav)
+
+    retry.defer.assert_called_once_with(retry.wav, app.config)
+    app._notify.assert_not_called()
+
+
+def test_crash_recovery_failure_defers_the_same_way(app, retry, monkeypatch, tmp_path):
+    _fail_transcription(monkeypatch)
+    orphan = tmp_path / 'orphan'
+    orphan.mkdir()
+    monkeypatch.setattr(menubar_module.recorder, 'merge_and_cleanup', lambda m, s, d: retry.wav)
+
+    app._recover_in_background([str(orphan)])
+
+    retry.defer.assert_called_once_with(retry.wav, app.config)
+    app._notify.assert_not_called()
+
+
+def test_abandonment_notifies_exactly_once(app, retry, monkeypatch):
+    error = _fail_transcription(monkeypatch)
+    retry.defer.return_value = menubar_module.transcription_retry.ledger.LedgerEntry('abandoned', 72)
+
+    app._transcribe_in_background(retry.wav)
+
+    app._notify.assert_called_once_with('Transcription failed', str(error))
+
+
+def test_notifies_when_the_recording_cannot_even_be_deferred(app, retry, monkeypatch):
+    error = _fail_transcription(monkeypatch)
+    retry.defer.side_effect = OSError('ledger unwritable')
+
+    app._transcribe_in_background(retry.wav)
+
+    app._notify.assert_called_once_with('Transcription failed', str(error))
+
+
+def test_successful_first_attempt_touches_no_ledger(app, retry):
+    app._transcribe_in_background(retry.wav)
+
+    retry.defer.assert_not_called()
+    retry.mark_done.assert_not_called()
+
+
+def test_scan_retries_a_due_entry_and_marks_it_done(app, retry, monkeypatch):
+    retry.due_paths.return_value = [retry.wav]
+    started = _capture_threads(monkeypatch)
+
+    app._run_transcription_retry_scan(sender=MagicMock())
+
+    assert len(started) == 1
+    started[0]()
+    retry.mark_done.assert_called_once_with(retry.wav, app.config)
+
+
+def test_scan_skips_a_recording_already_being_transcribed(app, retry):
+    app._claim_transcription(retry.wav)
+
+    app._transcribe_recording(retry.wav, is_retry=True)
+
+    retry.mark_done.assert_not_called()
+    retry.defer.assert_not_called()
+
+
+def test_in_flight_claim_is_released_after_an_attempt(app, retry):
+    app._transcribe_recording(retry.wav)
+
+    assert app._inflight_transcriptions == set()
+    # A later attempt for the same path is therefore not skipped.
+    assert app._claim_transcription(retry.wav) is True
+
+
+def test_in_flight_claim_is_released_after_a_failed_attempt(app, retry, monkeypatch):
+    _fail_transcription(monkeypatch)
+
+    app._transcribe_recording(retry.wav)
+
+    assert app._inflight_transcriptions == set()
+
+
+def test_scan_survives_an_unreadable_ledger(app, retry):
+    retry.due_paths.side_effect = OSError('unreadable')
+
+    app._run_transcription_retry_scan(sender=MagicMock())
+
+    app._notify.assert_not_called()

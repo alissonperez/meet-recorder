@@ -36,9 +36,9 @@ def _quiet_logger(monkeypatch):
 def _wiring(monkeypatch):
     '''Default happy-path wiring: one event, never skipped, exports return text, writes succeed.'''
     monkeypatch.setattr(meet_ingest.calendar, 'past_events', lambda config, hours: [_event()])
-    monkeypatch.setattr(meet_ingest.ledger, 'should_skip', lambda event_id: False)
+    monkeypatch.setattr(meet_ingest.ledger.MEET_LEDGER, 'should_skip', lambda event_id: False)
     mark_done = Mock()
-    monkeypatch.setattr(meet_ingest.ledger, 'mark_done', mark_done)
+    monkeypatch.setattr(meet_ingest.ledger.MEET_LEDGER, 'mark_done', mark_done)
     monkeypatch.setattr(
         meet_ingest.transcriber, 'write_meet_output',
         lambda event, text, config, gemini_context=None: {
@@ -124,7 +124,7 @@ def test_done_only_marked_after_successful_write(monkeypatch, _wiring):
 
 def test_per_file_access_error_defers_and_calls_callback(monkeypatch):
     monkeypatch.setattr(meet_ingest.calendar, 'past_events', lambda config, hours: [_event()])
-    monkeypatch.setattr(meet_ingest.ledger, 'should_skip', lambda event_id: False)
+    monkeypatch.setattr(meet_ingest.ledger.MEET_LEDGER, 'should_skip', lambda event_id: False)
     monkeypatch.setattr(
         meet_ingest.calendar, 'attachments_for_occurrence',
         lambda event: OccurrenceAttachments(['t1'], None),
@@ -134,8 +134,8 @@ def test_per_file_access_error_defers_and_calls_callback(monkeypatch):
         Mock(side_effect=DriveAccessError('not shared')),
     )
     record = Mock(return_value=SimpleNamespace(status='deferred', attempts=1))
-    monkeypatch.setattr(meet_ingest.ledger, 'record_access_failure', record)
-    monkeypatch.setattr(meet_ingest.ledger, 'mark_done', Mock())
+    monkeypatch.setattr(meet_ingest.ledger.MEET_LEDGER, 'record_failure', record)
+    monkeypatch.setattr(meet_ingest.ledger.MEET_LEDGER, 'mark_done', Mock())
     callback = Mock()
 
     written = meet_ingest.ingest_once(_config(), on_access_error=callback)
@@ -148,7 +148,7 @@ def test_per_file_access_error_defers_and_calls_callback(monkeypatch):
 
 def test_access_error_callback_not_called_on_retry(monkeypatch):
     monkeypatch.setattr(meet_ingest.calendar, 'past_events', lambda config, hours: [_event()])
-    monkeypatch.setattr(meet_ingest.ledger, 'should_skip', lambda event_id: False)
+    monkeypatch.setattr(meet_ingest.ledger.MEET_LEDGER, 'should_skip', lambda event_id: False)
     monkeypatch.setattr(
         meet_ingest.calendar, 'attachments_for_occurrence',
         lambda event: OccurrenceAttachments(['t1'], None),
@@ -158,10 +158,10 @@ def test_access_error_callback_not_called_on_retry(monkeypatch):
     )
     # attempts == 2 -> a later retry, not the first failure.
     monkeypatch.setattr(
-        meet_ingest.ledger, 'record_access_failure',
+        meet_ingest.ledger.MEET_LEDGER, 'record_failure',
         Mock(return_value=SimpleNamespace(status='deferred', attempts=2)),
     )
-    monkeypatch.setattr(meet_ingest.ledger, 'mark_done', Mock())
+    monkeypatch.setattr(meet_ingest.ledger.MEET_LEDGER, 'mark_done', Mock())
     callback = Mock()
 
     meet_ingest.ingest_once(_config(), on_access_error=callback)
@@ -171,7 +171,7 @@ def test_access_error_callback_not_called_on_retry(monkeypatch):
 
 def test_missing_scope_aborts_run_without_counting_attempt(monkeypatch):
     monkeypatch.setattr(meet_ingest.calendar, 'past_events', lambda config, hours: [_event()])
-    monkeypatch.setattr(meet_ingest.ledger, 'should_skip', lambda event_id: False)
+    monkeypatch.setattr(meet_ingest.ledger.MEET_LEDGER, 'should_skip', lambda event_id: False)
     monkeypatch.setattr(
         meet_ingest.calendar, 'attachments_for_occurrence',
         lambda event: OccurrenceAttachments(['t1'], None),
@@ -180,7 +180,7 @@ def test_missing_scope_aborts_run_without_counting_attempt(monkeypatch):
         meet_ingest.drive, 'export_doc_markdown', Mock(side_effect=DriveScopeError('re-auth')),
     )
     record = Mock()
-    monkeypatch.setattr(meet_ingest.ledger, 'record_access_failure', record)
+    monkeypatch.setattr(meet_ingest.ledger.MEET_LEDGER, 'record_failure', record)
 
     with pytest.raises(DriveScopeError):
         meet_ingest.ingest_once(_config())
@@ -190,7 +190,7 @@ def test_missing_scope_aborts_run_without_counting_attempt(monkeypatch):
 
 def test_skipped_occurrence_is_not_processed(monkeypatch):
     monkeypatch.setattr(meet_ingest.calendar, 'past_events', lambda config, hours: [_event()])
-    monkeypatch.setattr(meet_ingest.ledger, 'should_skip', lambda event_id: True)
+    monkeypatch.setattr(meet_ingest.ledger.MEET_LEDGER, 'should_skip', lambda event_id: True)
     attachments = Mock()
     monkeypatch.setattr(meet_ingest.calendar, 'attachments_for_occurrence', attachments)
 
@@ -204,8 +204,8 @@ def test_per_occurrence_non_access_error_does_not_abort_batch(monkeypatch):
     good = _event(event_id='good', title='Good')
     bad = _event(event_id='bad', title='Bad')
     monkeypatch.setattr(meet_ingest.calendar, 'past_events', lambda config, hours: [bad, good])
-    monkeypatch.setattr(meet_ingest.ledger, 'should_skip', lambda event_id: False)
-    monkeypatch.setattr(meet_ingest.ledger, 'mark_done', Mock())
+    monkeypatch.setattr(meet_ingest.ledger.MEET_LEDGER, 'should_skip', lambda event_id: False)
+    monkeypatch.setattr(meet_ingest.ledger.MEET_LEDGER, 'mark_done', Mock())
     monkeypatch.setattr(
         meet_ingest.calendar, 'attachments_for_occurrence',
         lambda event: OccurrenceAttachments(['t'], None),

@@ -5,6 +5,7 @@ from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import pytest
 import yaml
 
 from meet_recorder import transcriber
@@ -436,3 +437,79 @@ def test_split_into_chunks_invokes_ffmpeg_per_chunk(monkeypatch):
     for call in run_mock.call_args_list:
         args = call.args[0]
         assert args[0] == 'ffmpeg'
+
+
+# --- Immediate retry (layer 1) ----------------------------------------------
+
+def _status_error(status):
+    return transcriber.httpx.HTTPStatusError(
+        f'{status}', request=Mock(), response=Mock(status_code=status),
+    )
+
+
+def _flaky_post(monkeypatch, errors):
+    '''Stub httpx.post to raise each error in turn, then succeed; records the attempts.'''
+    monkeypatch.setenv('OPENROUTER_API_KEY', 'test-key')
+    monkeypatch.setattr(transcriber.time, 'sleep', lambda _: None)
+    attempts = []
+
+    def fake_post(url, json, headers, timeout):
+        attempts.append(json)
+        if len(attempts) <= len(errors):
+            raise errors[len(attempts) - 1]
+        return Mock(raise_for_status=lambda: None, json=lambda: {'text': 'chunk text'})
+
+    monkeypatch.setattr(transcriber.httpx, 'post', fake_post)
+    return attempts
+
+
+@pytest.mark.parametrize('error', [
+    transcriber.httpx.ReadTimeout('read operation timed out'),
+    transcriber.httpx.ConnectError('connection refused'),
+    _status_error(429),
+    _status_error(503),
+])
+def test_transcribe_chunk_retries_retryable_errors_then_succeeds(monkeypatch, tmp_path, error):
+    chunk = tmp_path / 'chunk.mp3'
+    chunk.write_bytes(b'audio')
+    attempts = _flaky_post(monkeypatch, [error])
+
+    assert transcriber._transcribe_chunk(str(chunk), _chunk_config()) == 'chunk text'
+    assert len(attempts) == 2
+
+
+def test_transcribe_chunk_fails_once_retries_are_exhausted(monkeypatch, tmp_path):
+    chunk = tmp_path / 'chunk.mp3'
+    chunk.write_bytes(b'audio')
+    errors = [transcriber.httpx.ReadTimeout('timed out')] * transcriber.TRANSCRIPTION_MAX_ATTEMPTS
+    attempts = _flaky_post(monkeypatch, errors)
+
+    with pytest.raises(transcriber.TranscriptionError):
+        transcriber._transcribe_chunk(str(chunk), _chunk_config())
+
+    assert len(attempts) == transcriber.TRANSCRIPTION_MAX_ATTEMPTS
+
+
+@pytest.mark.parametrize('status', [400, 401, 403, 404])
+def test_transcribe_chunk_does_not_retry_non_retryable_errors(monkeypatch, tmp_path, status):
+    chunk = tmp_path / 'chunk.mp3'
+    chunk.write_bytes(b'audio')
+    attempts = _flaky_post(monkeypatch, [_status_error(status)] * 3)
+
+    with pytest.raises(transcriber.TranscriptionError):
+        transcriber._transcribe_chunk(str(chunk), _chunk_config())
+
+    assert len(attempts) == 1
+
+
+def test_transcribe_chunk_missing_api_key_never_reaches_the_request(monkeypatch, tmp_path):
+    chunk = tmp_path / 'chunk.mp3'
+    chunk.write_bytes(b'audio')
+    monkeypatch.delenv('OPENROUTER_API_KEY', raising=False)
+    posted = Mock()
+    monkeypatch.setattr(transcriber.httpx, 'post', posted)
+
+    with pytest.raises(transcriber.TranscriptionError, match='OPENROUTER_API_KEY'):
+        transcriber._transcribe_chunk(str(chunk), _chunk_config())
+
+    posted.assert_not_called()

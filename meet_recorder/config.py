@@ -9,6 +9,11 @@ CONFIG_DIR = '~/.config/meet-recorder'
 DEFAULT_BASE_URL = 'https://openrouter.ai/api/v1'
 DEFAULT_CHUNK_DURATION_SECONDS = 7 * 60
 
+# Deferred transcription retries fire on a fixed hourly interval, so the attempt count
+# is the retry window in hours: 72 attempts is roughly three days.
+DEFAULT_TRANSCRIPTION_MAX_RETRIES = 72
+MAX_TRANSCRIPTION_MAX_RETRIES = 24 * 14
+
 DEFAULT_MATCH_BEFORE_MINUTES = 60
 DEFAULT_MATCH_AFTER_MINUTES = 15
 DEFAULT_MAX_ATTENDEES = 20
@@ -22,9 +27,9 @@ DEFAULT_AUTORECORD_PROMPT_DELAY_SECONDS = 0
 DEFAULT_MEET_POLL_INTERVAL_MINUTES = 15
 DEFAULT_MEET_LOOKBACK_HOURS = 12
 DEFAULT_MEET_MAX_ACCESS_RETRIES = 3
-# Bounds keep a processed occurrence inside the dedup ledger's 2-day retention window:
+# Bounds keep a processed occurrence inside the Meet ledger's 2-day retention window:
 # the look-back cannot exceed it, and the total access-retry span (retries x 1h) stays
-# well under it (see ledger.LEDGER_RETENTION_DAYS / ACCESS_RETRY_INTERVAL_HOURS).
+# well under it (see ledger.MEET_LEDGER's retention_days / retry_interval_hours).
 MAX_MEET_LOOKBACK_HOURS = 48
 MAX_MEET_ACCESS_RETRIES = 24
 
@@ -100,6 +105,9 @@ class Config:
         self.summary_dir = os.path.expanduser(data['summary_dir'])
         self.chunk_duration = int(data.get('chunk_duration', DEFAULT_CHUNK_DURATION_SECONDS))
         self.base_url = data.get('base_url', DEFAULT_BASE_URL)
+        self.transcription_max_retries = min(MAX_TRANSCRIPTION_MAX_RETRIES, max(1, int(
+            data.get('transcription_max_retries', DEFAULT_TRANSCRIPTION_MAX_RETRIES)
+        )))
 
         # Optional, additive Google Calendar section. Absent -> feature disabled.
         self.calendars = [c['name'] for c in (data.get('calendars') or [])]

@@ -8,7 +8,7 @@ import rumps
 from AppKit import NSAlert, NSApplication, NSStatusWindowLevel
 from PyObjCTools import AppHelper
 
-from meet_recorder import calendar, drive, meet_ingest, recorder, transcriber
+from meet_recorder import calendar, drive, meet_ingest, recorder, transcriber, transcription_retry
 from meet_recorder.config import load_config
 
 logger = logging.getLogger(__name__)
@@ -21,6 +21,9 @@ RECORDING_TRANSCRIBING_TITLE = '\U0001f534⏳'
 RECOVERY_SCAN_DELAY_SECONDS = 1
 AUTORECORD_FAILURE_NOTIFY_THRESHOLD = 3
 MEET_INGEST_FAILURE_NOTIFY_THRESHOLD = 3
+# Well under the ledger's 1h retry interval, so a due entry is picked up promptly;
+# a scan with nothing due is just one ledger read.
+TRANSCRIPTION_RETRY_SCAN_INTERVAL_SECONDS = 5 * 60
 
 
 class MenubarApp(rumps.App):
@@ -30,6 +33,10 @@ class MenubarApp(rumps.App):
         self.is_recording = False
         self.active_transcriptions = 0
         self._transcriptions_lock = threading.Lock()
+        # Paths whose transcription is running right now, so a retry scan can't start
+        # a second attempt for a file an earlier attempt is still working on.
+        self._inflight_transcriptions = set()
+        self._inflight_lock = threading.Lock()
 
         self.start_item = rumps.MenuItem('Iniciar', callback=self.on_start)
         self.stop_item = rumps.MenuItem('Parar', callback=None)
@@ -61,6 +68,10 @@ class MenubarApp(rumps.App):
         self._meet_poll_timer = self._build_meet_poll_timer()
         self._meet_poll_kickoff_timer = rumps.Timer(self._run_meet_poll_kickoff, RECOVERY_SCAN_DELAY_SECONDS)
 
+        self._transcription_retry_timer = rumps.Timer(
+            self._run_transcription_retry_scan, TRANSCRIPTION_RETRY_SCAN_INTERVAL_SECONDS
+        )
+
         if self._calendar_poll_timer is None:
             logger.info('Meeting prompt inactive (see debug log above for why)')
         else:
@@ -88,6 +99,7 @@ class MenubarApp(rumps.App):
         if self._meet_poll_timer is not None:
             self._meet_poll_timer.start()
             self._meet_poll_kickoff_timer.start()
+        self._transcription_retry_timer.start()
         super().run(**options)
 
     def _run_calendar_poll_kickoff(self, sender):
@@ -342,23 +354,13 @@ class MenubarApp(rumps.App):
         AppHelper.callAfter(self._show_alert, title=title, message=message, ok=ok)
 
     def _recover_in_background(self, orphan_dirs):
-        self._begin_transcription()
+        for orphan_dir in orphan_dirs:
+            mic_path = os.path.join(orphan_dir, 'mic.wav')
+            sys_path = os.path.join(orphan_dir, 'sys.wav')
+            path = recorder.merge_and_cleanup(mic_path, sys_path, orphan_dir)
+            logger.info(f'Recovered recording saved to {path}')
 
-        try:
-            for orphan_dir in orphan_dirs:
-                mic_path = os.path.join(orphan_dir, 'mic.wav')
-                sys_path = os.path.join(orphan_dir, 'sys.wav')
-                path = recorder.merge_and_cleanup(mic_path, sys_path, orphan_dir)
-                logger.info(f'Recovered recording saved to {path}')
-
-                try:
-                    asyncio.run(transcriber.transcribe(path))
-                    logger.info(f'Transcription finished for {path}')
-                except Exception as e:
-                    logger.error(f'Transcription failed for {path}: {e}')
-                    self._notify('Transcription failed', str(e))
-        finally:
-            self._end_transcription()
+            self._transcribe_recording(path)
 
     def _begin_transcription(self):
         # active_transcriptions is mutated by several background threads; += / -= are
@@ -427,16 +429,73 @@ class MenubarApp(rumps.App):
         self._set_recording_state(False)
 
     def _transcribe_in_background(self, path):
-        self._begin_transcription()
+        self._transcribe_recording(path)
 
+    def _transcribe_recording(self, path, is_retry=False):
+        '''Run the full pipeline for one recording, deferring to a later retry on failure.
+
+        Shared by the normal stop flow, crash recovery, and the deferred-retry scan, so
+        every entry point gets the same resilience. A recording already being transcribed
+        is skipped rather than attempted twice.'''
+        if not self._claim_transcription(path):
+            logger.debug(f'Transcription already in progress for {path}; skipping this attempt')
+            return
+
+        self._begin_transcription()
         try:
             asyncio.run(transcriber.transcribe(path))
             logger.info(f'Transcription finished for {path}')
+            if is_retry:
+                transcription_retry.mark_done(path, self.config)
         except Exception as e:
-            logger.error(f'Transcription failed for {path}: {e}')
-            self._notify('Transcription failed', str(e))
+            self._defer_transcription(path, e)
         finally:
             self._end_transcription()
+            self._release_transcription(path)
+
+    def _defer_transcription(self, path, error):
+        '''Queue a failed transcription for a later retry, notifying only once it is abandoned.'''
+        logger.error(f'Transcription failed for {path}: {error}')
+
+        try:
+            entry = transcription_retry.defer(path, self.config)
+        except Exception as e:
+            # Without a ledger entry nothing will ever retry, so fail loudly as before.
+            logger.error(f'Could not defer transcription for {path}: {e}')
+            self._notify('Transcription failed', str(error))
+            return
+
+        if entry.status == 'abandoned':
+            logger.error(f'Giving up on {path} after {entry.attempts} attempt(s)')
+            self._notify('Transcription failed', str(error))
+        else:
+            logger.info(f'Transcription for {path} deferred after attempt {entry.attempts}; will retry')
+
+    def _claim_transcription(self, path):
+        '''Reserve a recording for transcription; False when an attempt is already running.'''
+        with self._inflight_lock:
+            if path in self._inflight_transcriptions:
+                return False
+            self._inflight_transcriptions.add(path)
+            return True
+
+    def _release_transcription(self, path):
+        with self._inflight_lock:
+            self._inflight_transcriptions.discard(path)
+
+    def _run_transcription_retry_scan(self, sender):
+        try:
+            paths = transcription_retry.due_paths(self.config)
+        except Exception as e:
+            logger.warning(f'Deferred-transcription scan failed: {e}')
+            return
+
+        for path in paths:
+            logger.info(f'Retrying deferred transcription for {path}')
+            thread = threading.Thread(
+                target=self._transcribe_recording, args=(path,), kwargs={'is_retry': True}, daemon=True,
+            )
+            thread.start()
 
     def on_silence_warning(self):
         self._notify(
