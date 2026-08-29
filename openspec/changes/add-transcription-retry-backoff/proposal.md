@@ -4,12 +4,13 @@ Transcription failures today are terminal on the first attempt: a single retryab
 
 ## What Changes
 
-- Add immediate in-process retry (layer 1) to the transcription HTTP call in `_transcribe_chunk`: up to 3 attempts with a light backoff, but only for retryable errors (timeouts, connection errors, 5xx/429). Non-retryable errors (e.g. 401/invalid API key) skip straight to layer 2 instead of wasting retries.
-- Add deferred retry (layer 2) for when layer 1 is exhausted or bypassed: the whole `.wav` is queued for a full reprocess later, with a graduated backoff (5min → 30min → 2h → 6h → 24h cap) driven by a new periodic scan timer in the menu bar app.
-- Layer 2 gives up after a configurable total window (default 7 days), at which point the existing failure notification fires — exactly once, at final abandonment, not on every intermediate defer.
-- Generalize the existing dedup/retry ledger (`meet_recorder/ledger.py`, currently hardcoded to Meet-ingest's event-id keys and fixed 1-hour interval) so it can also track wav-path-keyed transcription retries with a caller-supplied backoff schedule, without changing Meet-ingest's existing behavior.
+- Add immediate in-process retry (layer 1) to the transcription HTTP call in `_transcribe_chunk`: up to 3 attempts with a light backoff, but only for retryable errors (timeouts, connection errors, 5xx/429). Non-retryable errors (e.g. 401/invalid API key) skip straight to layer 2 instead of wasting retries. Layer 1 applies to every caller of the transcription pipeline, including the `transcribe` CLI command.
+- Add deferred retry (layer 2) **in the menu bar app only** (the long-running process): when a menu-bar-initiated transcription fails, the whole `.wav` is queued for a full reprocess later and retried on a fixed hourly interval by a new periodic scan timer. The `transcribe` CLI command keeps its current terminal-failure behavior — there is no long-running process there to retry from.
+- Layer 2 gives up after a configurable number of attempts (`transcription_max_retries`, default 72 — roughly 3 days at the fixed hourly interval), at which point the existing failure notification fires — exactly once, at final abandonment, not on every intermediate defer. The total retry window is *derived* from attempts × interval rather than tracked as a separate wall-clock budget.
+- Guard against overlapping retries with an in-memory set of in-flight `.wav` paths, so a scan that fires while a previous attempt for the same file is still running skips it instead of transcribing it twice.
+- Generalize the existing dedup/retry ledger (`meet_recorder/ledger.py`, currently hardcoded to Meet-ingest's filename, retention, and retry interval) so it can also track wav-path-keyed transcription retries, and add the enumeration accessor the periodic scan needs, without changing Meet-ingest's existing behavior.
 - The crash-recovery path (`_recover_in_background`) is wired into the same layer-1/layer-2 flow as the normal stop-recording path, instead of failing immediately on any error.
-- **BREAKING**: none — this is purely additive resilience around an existing failure path; a transcription that previously failed immediately and required a manual CLI rerun will now retry automatically before failing, but success/failure semantics of a fully-exhausted run are unchanged.
+- **BREAKING**: none — this is purely additive resilience around an existing failure path. The one user-visible change is timing: a menu-bar transcription that previously notified immediately on failure now notifies only once retries are exhausted.
 
 ## Capabilities
 
@@ -17,15 +18,16 @@ Transcription failures today are terminal on the first attempt: a single retryab
 (none — this extends existing capabilities rather than introducing a new one)
 
 ### Modified Capabilities
-- `transcription`: adds retryable-vs-non-retryable classification and bounded in-process retry (layer 1) around the STT request; adds deferred, backoff-scheduled reprocessing (layer 2) as an alternative to immediate terminal failure; adds a configurable total retry window.
-- `menubar-app`: adds a periodic timer that scans for due deferred transcriptions and reprocesses them; changes the failure-notification requirement so a deferred transcription notifies only on final abandonment, not on every failed attempt; the crash-recovery transcription path now goes through the same retry flow as the normal stop-recording path.
+- `transcription`: adds retryable-vs-non-retryable classification and bounded in-process retry (layer 1) around the STT request; a run whose immediate retries are exhausted (or that failed non-retryably) still fails to its caller, unchanged.
+- `menubar-app`: adds a persistent deferred-retry ledger for failed transcriptions, a periodic timer that scans for due entries and reprocesses them, an in-flight guard against concurrent retries of the same file, a configurable attempt limit, and the transcription-failure notification fired exactly once at abandonment; the crash-recovery transcription path now goes through the same retry flow as the normal stop-recording path.
 
 ## Impact
 
 - `meet_recorder/transcriber.py`: `_transcribe_chunk` gains retry-with-backoff and error classification.
-- `meet_recorder/ledger.py`: generalized to support multiple ledgers/namespaces and caller-supplied backoff schedules instead of one hardcoded event-id ledger with a fixed interval.
+- `meet_recorder/ledger.py`: generalized into a per-namespace ledger (filename, retention, retry interval) with an accessor that enumerates due deferred entries, plus pruning of entries whose keyed file no longer exists.
 - `meet_recorder/meet_ingest.py`: updated only to call the generalized ledger API (no behavior change).
-- `meet_recorder/menubar.py`: new `rumps.Timer` for the deferred-retry scan; `_transcribe_in_background` and `_recover_in_background` updated to route failures through layers 1/2 instead of notifying immediately.
-- `meet_recorder/config.py`: new configurable field for the layer-2 total retry window (default 7 days).
-- `config.example.yaml` / `README.md` / `docs/prompts.md`: document the new config field if it affects documented setup.
-- Tests: new coverage for retry classification, backoff scheduling, ledger generalization, and the deferred-scan timer's notify-once-on-abandonment behavior.
+- `meet_recorder/transcription_retry.py` (new): the layer-2 helper — defers a failed `.wav`, lists due entries, and clears/abandons them.
+- `meet_recorder/menubar.py`: new `rumps.Timer` for the deferred-retry scan; in-flight guard; `_transcribe_in_background` and `_recover_in_background` collapsed into one helper that routes failures through layer 2.
+- `meet_recorder/config.py`: new `transcription_max_retries` field (bounded, like the other numeric fields); the `MAX_MEET_LOOKBACK_HOURS` comment referencing `ledger`'s module constants needs updating since those become per-namespace.
+- `config.example.yaml` / `README.md`: document the new config field.
+- Tests: new coverage for retry classification, ledger generalization and enumeration, deferral/abandonment, the in-flight guard, and the scan timer's notify-once-on-abandonment behavior.
