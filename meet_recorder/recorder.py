@@ -25,6 +25,15 @@ SAMPLE_RATE = 16000
 SYS_AUDIO_CHANNELS = 1
 SILENCE_CHECK_INTERVAL_SECONDS = 1.0
 EARLY_NO_BUFFER_CHECK_SECONDS = 5.0
+# The microphone silence check is skipped for this long after start_recording() so opening the
+# input device and the user starting to speak don't race a false "microphone is silent" warning.
+MIC_SILENCE_GRACE_SECONDS = 5.0
+# If no new audio chunk arrives on a channel for this long, its underlying device has likely
+# stopped delivering data entirely (e.g. a USB microphone unplugged mid-recording) rather than
+# merely gone quiet. The RMS buffer only decays when new (possibly silent) samples are appended,
+# so a hard stop like this would otherwise leave it holding pre-disconnect audio forever and
+# never read as silent; treating a stale channel as silent closes that gap.
+STALE_CHUNK_TIMEOUT_SECONDS = 5.0
 
 DEFAULT_RECORDINGS_DIR = '~/MeetRecordings'
 DEFAULT_SILENCE_RMS_THRESHOLD = 0.001
@@ -37,15 +46,43 @@ TIMESTAMP_FORMAT = '%Y-%m-%d_%H-%M-%S'
 # covers several seconds of buffered audio before a writer thread stall would drop frames.
 WRITER_QUEUE_MAXSIZE = 500
 MERGE_BLOCK_FRAMES = 16000
+# How often the padding thread levels the two channels' frame counts.
+PADDING_CHECK_INTERVAL_SECONDS = 0.5
+# A channel merely running a little behind (e.g. a chunk still in flight) is not padded until
+# the shortfall exceeds this many seconds, so the padder doesn't inflate a channel that is about
+# to catch up on its own.
+PADDING_TOLERANCE_SECONDS = 1.0
 
 
-def _default_on_silence_warning():
+def _default_on_silence_warning(channel):
     pass
 
 
-# Optional hook invoked alongside the log warning when sustained silence is detected.
-# Defaults to a no-op so the CLI-only path is unchanged; set by menubar.py when running under it.
+def _default_on_silence_recovered(channel):
+    pass
+
+
+# Optional hooks invoked alongside the log warning/recovery when a channel's sustained silence
+# state changes. Both receive the affected channel name ('mic' or 'sys'). Default to no-ops so
+# the CLI-only path is unchanged; set by menubar.py when running under it.
 on_silence_warning = _default_on_silence_warning
+on_silence_recovered = _default_on_silence_recovered
+
+
+class MicResumeFallbackError(RuntimeError):
+    '''Raised by resume_mic() when the requested device failed and it fell back to a working
+    one; the microphone is already capturing again on the fallback device by the time this
+    is raised, so callers should report it without treating the recording as broken.'''
+
+    def __init__(self, requested_device, fallback_device, original_error):
+        super().__init__(
+            f'Failed to resume microphone on device {requested_device} ({original_error}); '
+            f'fell back to device {fallback_device}'
+        )
+        self.requested_device = requested_device
+        self.fallback_device = fallback_device
+        self.original_error = original_error
+
 
 _state = {
     'mic_stream': None,
@@ -57,12 +94,23 @@ _state = {
     'mic_temp_path': None,
     'sys_temp_path': None,
     'temp_dir': None,
-    'silence_buffer': None,
-    'silence_buffer_lock': None,
+    'mic_silence_buffer': None,
+    'mic_silence_buffer_lock': None,
+    'sys_silence_buffer': None,
+    'sys_silence_buffer_lock': None,
     'silence_stop_event': None,
     'silence_thread': None,
     'first_sys_chunk_received': None,
     'early_check_timer': None,
+    'last_chunk_at': None,
+    'frame_counts': None,
+    'frame_counts_lock': None,
+    'padding_stop_event': None,
+    'padding_thread': None,
+    'mic_callback': None,
+    'mic_paused': False,
+    'last_mic_device': None,
+    'recording_active': False,
 }
 
 
@@ -76,6 +124,14 @@ def _silence_rms_threshold():
 
 def _silence_window_seconds():
     return float(os.environ.get('SILENCE_WINDOW_SECONDS', DEFAULT_SILENCE_WINDOW_SECONDS))
+
+
+def _refresh_audio_devices():
+    # sd._terminate()/sd._initialize() are private sounddevice calls (pinned sounddevice
+    # version in pyproject.toml) that force PortAudio to re-enumerate CoreAudio's current
+    # device list, instead of reusing a snapshot cached since process/library startup.
+    sd._terminate()
+    sd._initialize()
 
 
 def _find_default_mic_device():
@@ -119,58 +175,92 @@ def _stop_writer(file_queue, thread):
     thread.join()
 
 
-def _enqueue(file_queue, source_name, chunk):
+def _enqueue(file_queue, channel, chunk):
     try:
         file_queue.put_nowait(chunk)
     except queue.Full:
-        logger.warning(f'{source_name} writer queue is full - dropping an audio frame')
+        logger.warning(f'{channel} writer queue is full - dropping an audio frame')
+    _increment_frame_count(channel, len(chunk))
 
 
-def _append_to_silence_buffer(chunk):
+def _increment_frame_count(channel, frames):
+    with _state['frame_counts_lock']:
+        _state['frame_counts'][channel] += frames
+
+
+def _silence_state_key(channel):
+    return f'{channel}_silence_buffer'
+
+
+def _append_to_silence_buffer(channel, chunk):
     window_seconds = _silence_window_seconds()
     max_samples = int(window_seconds * SAMPLE_RATE)
+    buffer_key = _silence_state_key(channel)
 
-    with _state['silence_buffer_lock']:
-        buffer = np.concatenate([_state['silence_buffer'], chunk], axis=0)
+    with _state[f'{buffer_key}_lock']:
+        buffer = np.concatenate([_state[buffer_key], chunk], axis=0)
         if len(buffer) > max_samples:
             buffer = buffer[-max_samples:]
-        _state['silence_buffer'] = buffer
+        _state[buffer_key] = buffer
+
+    _state['last_chunk_at'][channel] = time.monotonic()
 
 
-def _read_silence_buffer():
-    with _state['silence_buffer_lock']:
-        return _state['silence_buffer'].copy()
+def _read_silence_buffer(channel):
+    buffer_key = _silence_state_key(channel)
+    with _state[f'{buffer_key}_lock']:
+        return _state[buffer_key].copy()
+
+
+_SILENCE_WARNING_TEXT = {
+    'sys': (
+        'System audio channel has been silent for over {window:.0f}s - '
+        'check that Screen Recording permission is granted to this process'
+    ),
+    'mic': (
+        'Microphone channel has been silent for over {window:.0f}s - '
+        'try switching the microphone input device'
+    ),
+}
 
 
 def _silence_monitor_loop(stop_event):
     threshold = _silence_rms_threshold()
     window_seconds = _silence_window_seconds()
+    mic_grace_until = time.monotonic() + MIC_SILENCE_GRACE_SECONDS
 
-    silent_since = None
-    warned = False
+    channel_state = {channel: {'silent_since': None, 'warned': False} for channel in ('mic', 'sys')}
 
     while not stop_event.wait(SILENCE_CHECK_INTERVAL_SECONDS):
-        buffer = _read_silence_buffer()
-
-        if len(buffer) == 0:
-            continue
-
-        level = _rms(buffer)
         now = time.monotonic()
 
-        if level <= threshold:
-            if silent_since is None:
-                silent_since = now
-            elif not warned and (now - silent_since) >= window_seconds:
-                logger.warning(
-                    f'System audio channel has been silent for over {window_seconds:.0f}s - '
-                    'check that Screen Recording permission is granted to this process'
-                )
-                on_silence_warning()
-                warned = True
-        else:
-            silent_since = None
-            warned = False
+        for channel, state in channel_state.items():
+            if channel == 'mic' and (now < mic_grace_until or _state['mic_paused']):
+                continue
+
+            last_chunk_at = _state['last_chunk_at'][channel]
+            stale = last_chunk_at is None or (now - last_chunk_at) >= STALE_CHUNK_TIMEOUT_SECONDS
+
+            if stale:
+                is_silent = True
+            else:
+                buffer = _read_silence_buffer(channel)
+                if len(buffer) == 0:
+                    continue
+                is_silent = _rms(buffer) <= threshold
+
+            if is_silent:
+                if state['silent_since'] is None:
+                    state['silent_since'] = now
+                elif not state['warned'] and (now - state['silent_since']) >= window_seconds:
+                    logger.warning(_SILENCE_WARNING_TEXT[channel].format(window=window_seconds))
+                    on_silence_warning(channel)
+                    state['warned'] = True
+            else:
+                if state['warned']:
+                    on_silence_recovered(channel)
+                state['silent_since'] = None
+                state['warned'] = False
 
 
 def _start_silence_monitor():
@@ -206,7 +296,7 @@ def _check_early_sys_buffers():
             f'No system-audio buffers received in the first {EARLY_NO_BUFFER_CHECK_SECONDS:.0f}s of '
             'recording - check that Screen Recording permission is granted to this process'
         )
-        on_silence_warning()
+        on_silence_warning('sys')
 
 
 def _start_early_buffer_check():
@@ -223,10 +313,66 @@ def _stop_early_buffer_check():
     _state['early_check_timer'] = None
 
 
+_PADDING_QUEUE_STATE_KEY = {'mic': 'mic_queue', 'sys': 'sys_queue'}
+
+
+def _level_channels(tolerance_frames=0):
+    '''Pads whichever channel has produced fewer frames with zeros through its own queue, so
+    both channels stay frame-aligned. A channel behind by no more than tolerance_frames is left
+    alone, so a channel that is merely running a little behind isn't inflated ahead of real
+    audio that is still in flight.'''
+    with _state['frame_counts_lock']:
+        counts = dict(_state['frame_counts'])
+
+    target = max(counts.values())
+    for channel, count in counts.items():
+        shortfall = target - count
+        if shortfall > tolerance_frames:
+            file_queue = _state[_PADDING_QUEUE_STATE_KEY[channel]]
+            zeros = np.zeros((shortfall, 1), dtype='float32')
+            _enqueue(file_queue, channel, zeros)
+
+
+def _padding_loop(stop_event):
+    tolerance_frames = int(PADDING_TOLERANCE_SECONDS * SAMPLE_RATE)
+    while not stop_event.wait(PADDING_CHECK_INTERVAL_SECONDS):
+        _level_channels(tolerance_frames)
+
+
+def _start_padding_thread():
+    stop_event = threading.Event()
+    thread = threading.Thread(target=_padding_loop, args=(stop_event,), daemon=True)
+
+    _state['padding_stop_event'] = stop_event
+    _state['padding_thread'] = thread
+
+    thread.start()
+
+
+def _stop_padding_thread():
+    stop_event = _state['padding_stop_event']
+    thread = _state['padding_thread']
+
+    if stop_event is not None:
+        stop_event.set()
+
+    if thread is not None:
+        thread.join(timeout=2)
+
+    # Final levelling pass (no tolerance) so the temporary files are frame-aligned before the
+    # writers are stopped, covering any shortfall that accrued since the last periodic tick.
+    if _state['frame_counts'] is not None:
+        _level_channels(tolerance_frames=0)
+
+    _state['padding_stop_event'] = None
+    _state['padding_thread'] = None
+
+
 def start_recording():
-    if _state['mic_stream'] is not None:
+    if _state['recording_active']:
         raise RuntimeError('A recording is already in progress')
 
+    _refresh_audio_devices()
     mic_device = _find_default_mic_device()
 
     temp_dir, mic_temp_path, sys_temp_path = _build_temp_paths()
@@ -235,17 +381,28 @@ def start_recording():
     mic_queue = queue.Queue(maxsize=WRITER_QUEUE_MAXSIZE)
     sys_queue = queue.Queue(maxsize=WRITER_QUEUE_MAXSIZE)
 
-    _state['silence_buffer'] = np.zeros((0, 1), dtype='float32')
-    _state['silence_buffer_lock'] = threading.Lock()
+    _state['mic_silence_buffer'] = np.zeros((0, 1), dtype='float32')
+    _state['mic_silence_buffer_lock'] = threading.Lock()
+    _state['sys_silence_buffer'] = np.zeros((0, 1), dtype='float32')
+    _state['sys_silence_buffer_lock'] = threading.Lock()
     _state['first_sys_chunk_received'] = threading.Event()
+    _state['last_chunk_at'] = {'mic': None, 'sys': None}
+    _state['frame_counts'] = {'mic': 0, 'sys': 0}
+    _state['frame_counts_lock'] = threading.Lock()
 
     def mic_callback(indata, frames, time_info, status):
-        _enqueue(mic_queue, 'mic', indata.copy())
+        if status:
+            logger.warning(f'Microphone input status: {status}')
+        chunk = indata.copy()
+        _enqueue(mic_queue, 'mic', chunk)
+        _append_to_silence_buffer('mic', chunk)
 
     def sys_on_chunk(chunk):
         _state['first_sys_chunk_received'].set()
         _enqueue(sys_queue, 'sys', chunk)
-        _append_to_silence_buffer(chunk)
+        _append_to_silence_buffer('sys', chunk)
+
+    _state['mic_callback'] = mic_callback
 
     mic_writer_thread = _start_writer(mic_queue, mic_temp_path)
     sys_writer_thread = _start_writer(sys_queue, sys_temp_path)
@@ -271,9 +428,15 @@ def start_recording():
         if sys_handle is not None:
             sck_capture.stop(sys_handle)
         shutil.rmtree(temp_dir, ignore_errors=True)
-        _state['silence_buffer'] = None
-        _state['silence_buffer_lock'] = None
+        _state['mic_silence_buffer'] = None
+        _state['mic_silence_buffer_lock'] = None
+        _state['sys_silence_buffer'] = None
+        _state['sys_silence_buffer_lock'] = None
         _state['first_sys_chunk_received'] = None
+        _state['last_chunk_at'] = None
+        _state['frame_counts'] = None
+        _state['frame_counts_lock'] = None
+        _state['mic_callback'] = None
         raise
 
     _state['mic_stream'] = mic_stream
@@ -285,9 +448,96 @@ def start_recording():
     _state['mic_temp_path'] = mic_temp_path
     _state['sys_temp_path'] = sys_temp_path
     _state['temp_dir'] = temp_dir
+    _state['mic_paused'] = False
+    _state['last_mic_device'] = mic_device
+    _state['recording_active'] = True
 
     _start_silence_monitor()
     _start_early_buffer_check()
+    _start_padding_thread()
+
+
+def pause_mic():
+    '''Stops and closes the current InputStream, leaving the mic queue, writer thread, padding
+    thread, and system-audio capture untouched. resume_mic() reopens against a device; the
+    padding thread keeps mic.wav frame-aligned with sys.wav for the whole pause.'''
+    if not _state['recording_active']:
+        raise RuntimeError('No recording is in progress')
+
+    if _state['mic_stream'] is None:
+        return
+
+    stream = _state['mic_stream']
+    try:
+        stream.stop()
+    except Exception as e:
+        logger.error(f'Error stopping mic stream during pause: {e}')
+    try:
+        stream.close()
+    except Exception as e:
+        logger.error(f'Error closing mic stream during pause: {e}')
+
+    _state['mic_stream'] = None
+    _state['mic_paused'] = True
+
+
+def list_input_devices():
+    '''Returns the currently available input devices. Only valid while microphone capture is
+    paused or has not started - _refresh_audio_devices() calls the private sd._terminate()/
+    sd._initialize() pair (see the comment there), which invalidates any open InputStream, so
+    this must never be called while _state["mic_stream"] is a live stream.'''
+    if _state['mic_stream'] is not None:
+        raise RuntimeError('Cannot enumerate input devices while microphone capture is active')
+
+    _refresh_audio_devices()
+    return [
+        {'index': index, 'name': device['name']}
+        for index, device in enumerate(sd.query_devices())
+        if device['max_input_channels'] > 0
+    ]
+
+
+def _open_mic_stream(device):
+    stream = sd.InputStream(
+        device=device, samplerate=SAMPLE_RATE, channels=1, dtype='float32', callback=_state['mic_callback'],
+    )
+    stream.start()
+    return stream
+
+
+def resume_mic(device=None):
+    '''Reopens the InputStream on the given device, falling back to the previously used device
+    and then the current default input device when device is None. Restores the same
+    mic_callback (and therefore the same mic_queue/mic.wav) used before the pause. If the
+    requested device fails to open (e.g. it doesn't support SAMPLE_RATE or mono), falls back to
+    the current default device and raises MicResumeFallbackError - the microphone is already
+    capturing again by the time that error is raised, so it must be reported, not treated as a
+    reason to stop the recording.'''
+    if not _state['recording_active']:
+        raise RuntimeError('No recording is in progress')
+
+    if _state['mic_stream'] is not None:
+        return _state['last_mic_device']
+
+    target_device = device if device is not None else _state['last_mic_device']
+    if target_device is None:
+        target_device = _find_default_mic_device()
+
+    try:
+        mic_stream = _open_mic_stream(target_device)
+    except Exception as original_error:
+        logger.error(f'Failed to resume microphone on device {target_device}: {original_error}')
+        fallback_device = _find_default_mic_device()
+        mic_stream = _open_mic_stream(fallback_device)
+        _state['mic_stream'] = mic_stream
+        _state['mic_paused'] = False
+        _state['last_mic_device'] = fallback_device
+        raise MicResumeFallbackError(target_device, fallback_device, original_error) from original_error
+
+    _state['mic_stream'] = mic_stream
+    _state['mic_paused'] = False
+    _state['last_mic_device'] = target_device
+    return target_device
 
 
 def _merge_to_stereo(mic_path, sys_path, output_path):
@@ -333,20 +583,27 @@ def _teardown_capture():
         _stop_early_buffer_check()
         _stop_silence_monitor()
 
-        try:
-            _state['mic_stream'].stop()
-        except Exception as e:
-            logger.error(f'Error stopping mic stream: {e}')
-        try:
-            _state['mic_stream'].close()
-        except Exception as e:
-            logger.error(f'Error closing mic stream: {e}')
-        sck_capture.stop(_state['sys_handle'])
+        if _state['mic_stream'] is not None:
+            try:
+                _state['mic_stream'].stop()
+            except Exception as e:
+                logger.error(f'Error stopping mic stream: {e}')
+            try:
+                _state['mic_stream'].close()
+            except Exception as e:
+                logger.error(f'Error closing mic stream: {e}')
+        sys_handle = _state['sys_handle']
+        stopped_unexpectedly = sys_handle.stopped_unexpectedly if sys_handle is not None else None
+        sck_capture.stop(sys_handle)
+
+        # Stop the padder (which performs a final zero-tolerance levelling pass) before the
+        # writers, so any shortfall still outstanding is padded before the queues are drained.
+        _stop_padding_thread()
 
         _stop_writer(_state['mic_queue'], _state['mic_writer_thread'])
         _stop_writer(_state['sys_queue'], _state['sys_writer_thread'])
 
-        return _state['mic_temp_path'], _state['sys_temp_path'], _state['temp_dir']
+        return _state['mic_temp_path'], _state['sys_temp_path'], _state['temp_dir'], stopped_unexpectedly
     finally:
         _state['mic_stream'] = None
         _state['sys_handle'] = None
@@ -357,24 +614,39 @@ def _teardown_capture():
         _state['mic_temp_path'] = None
         _state['sys_temp_path'] = None
         _state['temp_dir'] = None
-        _state['silence_buffer'] = None
-        _state['silence_buffer_lock'] = None
+        _state['mic_silence_buffer'] = None
+        _state['mic_silence_buffer_lock'] = None
+        _state['sys_silence_buffer'] = None
+        _state['sys_silence_buffer_lock'] = None
         _state['first_sys_chunk_received'] = None
+        _state['last_chunk_at'] = None
+        _state['frame_counts'] = None
+        _state['frame_counts_lock'] = None
+        _state['mic_callback'] = None
+        _state['mic_paused'] = False
+        _state['last_mic_device'] = None
+        _state['recording_active'] = False
 
 
 def stop_recording_and_save():
-    if _state['mic_stream'] is None:
+    if not _state['recording_active']:
         raise RuntimeError('No recording is in progress')
 
-    mic_temp_path, sys_temp_path, temp_dir = _teardown_capture()
-    return merge_and_cleanup(mic_temp_path, sys_temp_path, temp_dir)
+    mic_temp_path, sys_temp_path, temp_dir, stopped_unexpectedly = _teardown_capture()
+    path = merge_and_cleanup(mic_temp_path, sys_temp_path, temp_dir)
+    if stopped_unexpectedly:
+        logger.warning(
+            f'Recording saved to {path} but system-audio capture stopped unexpectedly '
+            f'partway through ({stopped_unexpectedly}); the file may be truncated.'
+        )
+    return path
 
 
 def discard_recording():
-    if _state['mic_stream'] is None:
+    if not _state['recording_active']:
         raise RuntimeError('No recording is in progress')
 
-    _mic_temp_path, _sys_temp_path, temp_dir = _teardown_capture()
+    _mic_temp_path, _sys_temp_path, temp_dir, _stopped_unexpectedly = _teardown_capture()
     shutil.rmtree(temp_dir, ignore_errors=True)
 
 

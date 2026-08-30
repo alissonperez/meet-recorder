@@ -79,6 +79,10 @@ class _CaptureDelegate(NSObject, protocols=[SCStreamOutput, SCStreamDelegateProt
     def stream_didStopWithError_(self, stream, error):
         if error is not None:
             logger.error(f'ScreenCaptureKit stream stopped with error: {error}')
+            handle = self.handle
+            if handle is not None:
+                handle.stopped_unexpectedly = str(error)
+                handle._active = False
 
 
 def _log_format(sample_buffer):
@@ -104,6 +108,7 @@ class CaptureHandle:
         self.delegate = None
         self._active = False
         self._format_logged = False
+        self.stopped_unexpectedly = None
 
 
 def _run_async(timeout_seconds, action):
@@ -191,6 +196,9 @@ def start(on_chunk, sample_rate, channels=1):
 def stop(handle):
     '''Stop a capture started with `start`. Safe to call even if the stream never fully started.'''
     if handle is None or handle.stream is None:
+        return
+
+    if not handle._active:
         return
 
     handle._active = False

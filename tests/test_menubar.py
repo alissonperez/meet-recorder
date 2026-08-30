@@ -1,3 +1,5 @@
+import threading
+import time
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -41,6 +43,40 @@ class _StubConfig:
         return bool(self.calendars)
 
 
+class _SyncThread:
+    '''Stand-in for threading.Thread that runs its target immediately on .start(), so tests
+    exercising the background-start path stay synchronous and deterministic.'''
+
+    def __init__(self, target=None, args=(), kwargs=None, daemon=None):
+        self._target = target
+        self._args = args
+        self._kwargs = kwargs or {}
+
+    def start(self):
+        self._target(*self._args, **self._kwargs)
+
+    def join(self, timeout=None):
+        pass
+
+
+class _SyncThreadingModule:
+    '''Stands in for the `threading` module reference inside menubar_module: every other
+    attribute (Lock, Event, Timer, ...) delegates to the real threading module, but Thread
+    is replaced so patching it doesn't mutate the real threading.Thread class used elsewhere
+    (e.g. by real background threads spawned in other tests).'''
+    Thread = _SyncThread
+
+    def __getattr__(self, name):
+        return getattr(threading, name)
+
+
+def _run_start_synchronously(monkeypatch):
+    # start_recording() is dispatched to a background thread with the result marshaled back
+    # via AppHelper.callAfter; run both inline so assertions can observe the result immediately.
+    monkeypatch.setattr(menubar_module, 'threading', _SyncThreadingModule())
+    monkeypatch.setattr(menubar_module.AppHelper, 'callAfter', lambda func, *a, **k: func(*a, **k))
+
+
 @pytest.fixture
 def app(monkeypatch):
     monkeypatch.setattr(menubar_module.MenubarApp, '_load_config_safe', lambda self: _StubConfig(enabled=False))
@@ -48,10 +84,12 @@ def app(monkeypatch):
     monkeypatch.setattr(
         menubar_module.rumps.Timer, '__init__', lambda self, *a, **k: None,
     )
+    _run_start_synchronously(monkeypatch)
 
     instance = menubar_module.MenubarApp()
     instance._show_alert = MagicMock()
     instance._notify = MagicMock()
+    instance._blink_timer = MagicMock()
     return instance
 
 
@@ -61,6 +99,7 @@ def app_with_calendar(monkeypatch):
     monkeypatch.setattr(
         menubar_module.rumps.Timer, '__init__', lambda self, *a, **k: None,
     )
+    _run_start_synchronously(monkeypatch)
 
     instance = menubar_module.MenubarApp()
     instance._show_alert = MagicMock()
@@ -426,6 +465,78 @@ def test_on_discard_confirms_discards_and_resets_state(app, monkeypatch):
     assert app.start_item.callback == app.on_start
 
 
+def test_on_start_runs_recording_in_background_without_blocking(app, monkeypatch):
+    # Use a real thread here (rather than the fixture's synchronous stub) to prove the menu
+    # bar stays responsive while start_recording() is still pending.
+    monkeypatch.setattr(menubar_module, 'threading', threading)
+    monkeypatch.setattr(menubar_module.AppHelper, 'callAfter', lambda func, *a, **k: func(*a, **k))
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow_start_recording():
+        started.set()
+        release.wait(timeout=5)
+
+    monkeypatch.setattr(menubar_module.recorder, 'start_recording', slow_start_recording)
+
+    app.on_start(None)
+    assert started.wait(timeout=5) is True
+
+    # While the background start is still pending, other menu actions remain callable
+    # (menu state hasn't flipped to "recording" yet, but nothing is frozen/blocked).
+    assert app.start_item.callback is None
+    assert app._start_in_progress is True
+    app.on_discard(None)  # must return immediately rather than blocking on the pending start
+    app._show_alert.assert_called_once()
+
+    release.set()
+    for _ in range(500):
+        if not app._start_in_progress:
+            break
+        time.sleep(0.01)
+
+    assert app.is_recording is True
+    assert app.start_item.callback is None
+    assert app.stop_item.callback == app.on_stop
+
+
+def test_on_start_second_click_while_in_flight_is_noop(app, monkeypatch):
+    start_recording = MagicMock()
+    monkeypatch.setattr(menubar_module.recorder, 'start_recording', start_recording)
+    app._start_in_progress = True
+    app.start_item.set_callback(None)
+
+    app.on_start(None)
+
+    start_recording.assert_not_called()
+
+
+def test_on_start_failure_shows_alert_and_reenables_start(app, monkeypatch):
+    start_recording = MagicMock(side_effect=RuntimeError('no mic'))
+    monkeypatch.setattr(menubar_module.recorder, 'start_recording', start_recording)
+    alert = MagicMock()
+    monkeypatch.setattr(menubar_module.rumps, 'alert', alert)
+
+    app.on_start(None)
+
+    alert.assert_called_once_with(title='Failed to start recording', message='no mic')
+    assert app._start_in_progress is False
+    assert app.start_item.callback == app.on_start
+
+
+def test_on_start_success_enables_stop_items(app, monkeypatch):
+    monkeypatch.setattr(menubar_module.recorder, 'start_recording', MagicMock())
+
+    app.on_start(None)
+
+    assert app._start_in_progress is False
+    assert app.is_recording is True
+    assert app.start_item.callback is None
+    assert app.stop_item.callback == app.on_stop
+    assert app.stop_no_transcribe_item.callback == app.on_stop_no_transcribe
+    assert app.discard_item.callback == app.on_discard
+
+
 def test_on_discard_cancel_leaves_recording_running(app, monkeypatch):
     app._set_recording_state(True)
     app._show_alert.return_value = 0
@@ -593,3 +704,213 @@ def test_scan_survives_an_unreadable_ledger(app, retry):
     app._run_transcription_retry_scan(sender=MagicMock())
 
     app._notify.assert_not_called()
+# --- Microphone-attention icon blink ------------------------------------------
+
+def test_blink_toggles_state_name_while_flag_is_set(app):
+    app._set_recording_state(True)
+    assert app._current_state_name() == 'recording'
+
+    app._add_mic_attention_reason('silence')
+    app._blink_timer.start.assert_called_once()
+    assert app._current_state_name() == 'recording'
+
+    app._on_blink_tick(None)
+    assert app._current_state_name() == 'idle'
+
+    app._on_blink_tick(None)
+    assert app._current_state_name() == 'recording'
+
+
+def test_blink_applies_to_recording_transcribing_state(app):
+    app._set_recording_state(True)
+    app._begin_transcription()
+    assert app._current_state_name() == 'recording_transcribing'
+
+    app._add_mic_attention_reason('paused')
+    app._blink_phase = True
+
+    assert app._current_state_name() == 'idle'
+
+
+def test_blink_stops_on_recovery(app):
+    app._set_recording_state(True)
+    app._add_mic_attention_reason('silence')
+    app._blink_phase = True
+    assert app._current_state_name() == 'idle'
+
+    app._clear_mic_attention_reason('silence')
+
+    app._blink_timer.stop.assert_called_once()
+    assert app._current_state_name() == 'recording'
+
+
+def test_blink_reasons_do_not_clear_until_all_cleared(app):
+    app._set_recording_state(True)
+    app._add_mic_attention_reason('silence')
+    app._add_mic_attention_reason('paused')
+
+    app._clear_mic_attention_reason('silence')
+    app._blink_timer.stop.assert_not_called()
+
+    app._clear_mic_attention_reason('paused')
+    app._blink_timer.stop.assert_called_once()
+
+
+def test_steady_states_unchanged_when_flag_clear(app):
+    assert app._current_state_name() == 'idle'
+    app._set_recording_state(True)
+    assert app._current_state_name() == 'recording'
+    app._begin_transcription()
+    assert app._current_state_name() == 'recording_transcribing'
+    app._end_transcription()
+    app._set_recording_state(False)
+    assert app._current_state_name() == 'idle'
+
+
+def test_on_silence_warning_mic_channel_sets_attention_and_notifies(app):
+    app._set_recording_state(True)
+
+    app.on_silence_warning('mic')
+
+    assert 'silence' in app._mic_attention_reasons
+    app._notify.assert_called_once()
+    assert 'Microphone' in app._notify.call_args.args[0]
+
+
+def test_on_silence_warning_sys_channel_does_not_set_attention(app):
+    app._set_recording_state(True)
+
+    app.on_silence_warning('sys')
+
+    assert 'silence' not in app._mic_attention_reasons
+    app._notify.assert_called_once()
+    assert 'System audio' in app._notify.call_args.args[0]
+
+
+def test_on_silence_recovered_clears_mic_attention(app):
+    app._set_recording_state(True)
+    app._add_mic_attention_reason('silence')
+
+    app.on_silence_recovered('mic')
+
+    assert 'silence' not in app._mic_attention_reasons
+
+
+def test_on_silence_warning_marshals_to_main_thread(app, monkeypatch):
+    # The recorder's silence monitor calls this from its own background thread; the blink
+    # timer and status bar icon it touches must be driven from the main thread, so this must
+    # not run inline on whatever thread calls it.
+    call_after = MagicMock()
+    monkeypatch.setattr(menubar_module.AppHelper, 'callAfter', call_after)
+
+    app.on_silence_warning('mic')
+
+    app._notify.assert_not_called()
+    call_after.assert_called_once_with(app._handle_silence_warning, 'mic')
+
+
+def test_on_silence_recovered_marshals_to_main_thread(app, monkeypatch):
+    call_after = MagicMock()
+    monkeypatch.setattr(menubar_module.AppHelper, 'callAfter', call_after)
+
+    app.on_silence_recovered('mic')
+
+    call_after.assert_called_once_with(app._handle_silence_recovered, 'mic')
+
+
+# --- Switch microphone from the menu bar --------------------------------------
+
+def test_switch_mic_item_enablement_follows_recording_state(app):
+    assert app.switch_mic_item.callback is None
+
+    app._set_recording_state(True)
+    assert app.switch_mic_item.callback == app.on_switch_mic
+
+    app._set_recording_state(False)
+    assert app.switch_mic_item.callback is None
+
+
+def test_on_switch_mic_pauses_then_builds_dialog_after_pause(app, monkeypatch):
+    app._set_recording_state(True)
+    call_order = []
+    monkeypatch.setattr(menubar_module.recorder, 'pause_mic', lambda: call_order.append('pause'))
+    monkeypatch.setattr(
+        menubar_module.recorder, 'list_input_devices',
+        lambda: call_order.append('enumerate') or [{'index': 0, 'name': 'Built-in Mic'}],
+    )
+    dialog = MagicMock()
+    monkeypatch.setattr(menubar_module.AppHelper, 'callAfter', lambda func, *a, **k: func(*a, **k))
+    monkeypatch.setattr(menubar_module.MenubarApp, '_show_mic_selection_dialog', dialog)
+
+    app.on_switch_mic(None)
+
+    assert call_order == ['pause', 'enumerate']
+    dialog.assert_called_once()
+    devices_arg = dialog.call_args.args[0]
+    assert devices_arg == [{'index': 0, 'name': 'Built-in Mic'}]
+
+
+def test_switch_mic_cancellation_resumes_capture(app, monkeypatch):
+    app._set_recording_state(True)
+    resume_mic = MagicMock(return_value=None)
+    monkeypatch.setattr(menubar_module.recorder, 'resume_mic', resume_mic)
+    monkeypatch.setattr(menubar_module.AppHelper, 'callAfter', lambda func, *a, **k: func(*a, **k))
+    monkeypatch.setattr(menubar_module.MenubarApp, '_run_mic_selection_alert', lambda self, devices: None)
+
+    app._show_mic_selection_dialog([{'index': 0, 'name': 'Built-in Mic'}])
+
+    resume_mic.assert_called_once_with(None)
+    assert app.switch_mic_item.callback == app.on_switch_mic
+    assert 'paused' not in app._mic_attention_reasons
+
+
+def test_switch_mic_selection_resumes_on_chosen_device(app, monkeypatch):
+    app._set_recording_state(True)
+    resume_mic = MagicMock(return_value=None)
+    monkeypatch.setattr(menubar_module.recorder, 'resume_mic', resume_mic)
+    monkeypatch.setattr(menubar_module.AppHelper, 'callAfter', lambda func, *a, **k: func(*a, **k))
+    monkeypatch.setattr(menubar_module.MenubarApp, '_run_mic_selection_alert', lambda self, devices: 2)
+
+    app._show_mic_selection_dialog([{'index': 2, 'name': 'AirPods'}])
+
+    resume_mic.assert_called_once_with(2)
+
+
+def test_switch_mic_empty_device_list_resumes_previous(app, monkeypatch):
+    app._set_recording_state(True)
+    resume_mic = MagicMock(return_value=None)
+    monkeypatch.setattr(menubar_module.recorder, 'resume_mic', resume_mic)
+    monkeypatch.setattr(menubar_module.AppHelper, 'callAfter', lambda func, *a, **k: func(*a, **k))
+
+    app._show_mic_selection_dialog([])
+
+    app._show_alert.assert_called_once()
+    resume_mic.assert_called_once_with(None)
+
+
+def test_switch_mic_failure_shows_alert_without_stopping_recording(app, monkeypatch):
+    app._set_recording_state(True)
+    monkeypatch.setattr(
+        menubar_module.recorder, 'resume_mic',
+        MagicMock(side_effect=RuntimeError('unsupported sample rate')),
+    )
+    call_after = MagicMock(side_effect=lambda func, *a, **k: func(*a, **k))
+    monkeypatch.setattr(menubar_module.AppHelper, 'callAfter', call_after)
+
+    app._resume_mic_async(3)
+
+    app._show_alert.assert_called_once()
+    assert app.is_recording is True
+
+
+def test_switch_mic_setup_failure_falls_back_and_shows_alert(app, monkeypatch):
+    app._set_recording_state(True)
+    monkeypatch.setattr(menubar_module.recorder, 'pause_mic', MagicMock(side_effect=RuntimeError('no permission')))
+    monkeypatch.setattr(menubar_module.recorder, 'resume_mic', MagicMock(return_value=1))
+    monkeypatch.setattr(menubar_module.AppHelper, 'callAfter', lambda func, *a, **k: func(*a, **k))
+
+    app.on_switch_mic(None)
+
+    app._show_alert.assert_called_once()
+    assert app.is_recording is True
+    assert app.switch_mic_item.callback == app.on_switch_mic

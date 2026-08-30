@@ -311,6 +311,27 @@ def test_start_recording_forwards_sck_chunks_through_sys_queue(tmp_path, monkeyp
     recorder.stop_recording_and_save()
 
 
+def test_start_recording_refreshes_audio_devices_before_finding_mic_device(tmp_path, monkeypatch):
+    monkeypatch.setenv('RECORDINGS_DIR', str(tmp_path))
+    monkeypatch.setattr(recorder.sd.default, 'device', (0, 0))
+    monkeypatch.setattr(recorder.sd, 'InputStream', MagicMock(return_value=MagicMock()))
+    monkeypatch.setattr(recorder.sck_capture, 'start', MagicMock(return_value=MagicMock()))
+    monkeypatch.setattr(recorder.sck_capture, 'stop', MagicMock())
+
+    call_order = []
+    monkeypatch.setattr(recorder.sd, '_terminate', MagicMock(side_effect=lambda: call_order.append('terminate')))
+    monkeypatch.setattr(recorder.sd, '_initialize', MagicMock(side_effect=lambda: call_order.append('initialize')))
+    find_device_spy = MagicMock(side_effect=recorder._find_default_mic_device)
+    monkeypatch.setattr(recorder, '_find_default_mic_device', find_device_spy)
+
+    recorder.start_recording()
+
+    assert call_order == ['terminate', 'initialize']
+    find_device_spy.assert_called_once()
+
+    recorder.stop_recording_and_save()
+
+
 def _spy_on_start_writer(monkeypatch):
     '''Let the real _start_writer/_stop_writer run (so cleanup is genuine), but record the
     threads created so failure-path tests can assert they were actually joined.'''
@@ -336,10 +357,16 @@ def test_start_recording_cleans_up_when_sck_capture_start_fails(tmp_path, monkey
     monkeypatch.setattr(recorder.sck_capture, 'start', MagicMock(side_effect=RuntimeError('no permission')))
     sck_stop = MagicMock()
     monkeypatch.setattr(recorder.sck_capture, 'stop', sck_stop)
+    terminate_spy = MagicMock()
+    initialize_spy = MagicMock()
+    monkeypatch.setattr(recorder.sd, '_terminate', terminate_spy)
+    monkeypatch.setattr(recorder.sd, '_initialize', initialize_spy)
 
     with pytest.raises(RuntimeError, match='no permission'):
         recorder.start_recording()
 
+    terminate_spy.assert_called_once()
+    initialize_spy.assert_called_once()
     assert len(threads) == 2
     assert all(not t.is_alive() for t in threads)
     mic_stream.close.assert_called_once()
@@ -361,10 +388,16 @@ def test_start_recording_cleans_up_when_mic_stream_start_fails(tmp_path, monkeyp
     monkeypatch.setattr(recorder.sck_capture, 'start', MagicMock(return_value=fake_handle))
     sck_stop = MagicMock()
     monkeypatch.setattr(recorder.sck_capture, 'stop', sck_stop)
+    terminate_spy = MagicMock()
+    initialize_spy = MagicMock()
+    monkeypatch.setattr(recorder.sd, '_terminate', terminate_spy)
+    monkeypatch.setattr(recorder.sd, '_initialize', initialize_spy)
 
     with pytest.raises(RuntimeError, match='PortAudio error'):
         recorder.start_recording()
 
+    terminate_spy.assert_called_once()
+    initialize_spy.assert_called_once()
     assert len(threads) == 2
     assert all(not t.is_alive() for t in threads)
     mic_stream.close.assert_called_once()
@@ -394,9 +427,430 @@ def test_stop_recording_still_stops_writers_and_merges_when_mic_stream_stop_rais
     assert recorder._state['sys_handle'] is None
 
 
+def test_stop_recording_warns_when_sys_handle_stopped_unexpectedly(tmp_path, monkeypatch, caplog):
+    monkeypatch.setenv('RECORDINGS_DIR', str(tmp_path))
+    monkeypatch.setattr(recorder.sd.default, 'device', (0, 0))
+    monkeypatch.setattr(recorder.sd, 'InputStream', MagicMock(return_value=MagicMock()))
+
+    fake_handle = MagicMock()
+    fake_handle.stopped_unexpectedly = 'connection interruption'
+    monkeypatch.setattr(recorder.sck_capture, 'start', MagicMock(return_value=fake_handle))
+    monkeypatch.setattr(recorder.sck_capture, 'stop', MagicMock())
+
+    recorder.start_recording()
+
+    with caplog.at_level('WARNING'):
+        path = recorder.stop_recording_and_save()
+
+    assert path in caplog.text
+    assert 'connection interruption' in caplog.text
+
+
+def test_stop_recording_does_not_warn_on_normal_stop(tmp_path, monkeypatch, caplog):
+    monkeypatch.setenv('RECORDINGS_DIR', str(tmp_path))
+    monkeypatch.setattr(recorder.sd.default, 'device', (0, 0))
+    monkeypatch.setattr(recorder.sd, 'InputStream', MagicMock(return_value=MagicMock()))
+
+    fake_handle = MagicMock()
+    fake_handle.stopped_unexpectedly = None
+    monkeypatch.setattr(recorder.sck_capture, 'start', MagicMock(return_value=fake_handle))
+    monkeypatch.setattr(recorder.sck_capture, 'stop', MagicMock())
+
+    recorder.start_recording()
+
+    with caplog.at_level('WARNING'):
+        recorder.stop_recording_and_save()
+
+    assert caplog.text == ''
+
+
 def test_discard_recording_raises_when_no_recording_in_progress():
     with pytest.raises(RuntimeError, match='No recording is in progress'):
         recorder.discard_recording()
+
+
+def _start_recording_with_stubs(tmp_path, monkeypatch, mic_stream=None):
+    monkeypatch.setenv('RECORDINGS_DIR', str(tmp_path))
+    monkeypatch.setattr(recorder.sd.default, 'device', (0, 0))
+    mic_stream = mic_stream if mic_stream is not None else MagicMock()
+    monkeypatch.setattr(recorder.sd, 'InputStream', MagicMock(return_value=mic_stream))
+    fake_handle = MagicMock()
+    fake_handle.stopped_unexpectedly = None
+    monkeypatch.setattr(recorder.sck_capture, 'start', MagicMock(return_value=fake_handle))
+    monkeypatch.setattr(recorder.sck_capture, 'stop', MagicMock())
+
+    recorder.start_recording()
+
+    return mic_stream, fake_handle
+
+
+# --- Frame-count padding -----------------------------------------------------
+
+def test_dropped_frames_are_padded_to_stay_aligned(tmp_path, monkeypatch):
+    _start_recording_with_stubs(tmp_path, monkeypatch)
+
+    # Simulate real audio landing on sys but a dropped frame (queue-full) on mic.
+    recorder._increment_frame_count('sys', 1600)
+    recorder._level_channels(tolerance_frames=0)
+
+    assert recorder._state['frame_counts']['mic'] == 1600
+    assert recorder._state['frame_counts']['sys'] == 1600
+    assert recorder._state['mic_queue'].qsize() == 1
+
+    recorder.stop_recording_and_save()
+
+
+def test_padding_accrues_continuously_not_only_at_resume(tmp_path, monkeypatch):
+    _start_recording_with_stubs(tmp_path, monkeypatch)
+
+    recorder._increment_frame_count('sys', 800)
+    recorder._level_channels(tolerance_frames=0)
+    assert recorder._state['frame_counts']['mic'] == 800
+
+    recorder._increment_frame_count('sys', 400)
+    recorder._level_channels(tolerance_frames=0)
+    assert recorder._state['frame_counts']['mic'] == 1200
+
+    recorder.stop_recording_and_save()
+
+
+def test_level_channels_respects_tolerance(tmp_path, monkeypatch):
+    _start_recording_with_stubs(tmp_path, monkeypatch)
+
+    recorder._increment_frame_count('sys', 100)
+    recorder._level_channels(tolerance_frames=1000)
+
+    assert recorder._state['frame_counts']['mic'] == 0
+    assert recorder._state['mic_queue'].qsize() == 0
+
+    recorder.stop_recording_and_save()
+
+
+def test_teardown_performs_final_levelling_pass(tmp_path, monkeypatch):
+    _start_recording_with_stubs(tmp_path, monkeypatch)
+
+    recorder._state['padding_stop_event'].set()
+    recorder._state['padding_thread'].join(timeout=2)
+    sys_chunk = np.zeros((500, 1), dtype='float32')
+    recorder._enqueue(recorder._state['sys_queue'], 'sys', sys_chunk)
+
+    path = recorder.stop_recording_and_save()
+
+    with sf.SoundFile(path, mode='r') as f:
+        assert len(f) >= 500
+
+
+def test_early_sck_stop_preserves_full_mic_tail_and_still_warns(tmp_path, monkeypatch, caplog):
+    mic_stream, fake_handle = _start_recording_with_stubs(tmp_path, monkeypatch)
+
+    mic_queue = recorder._state['mic_queue']
+    mic_chunk = np.zeros((SAMPLE_RATE, 1), dtype='float32')
+    recorder._enqueue(mic_queue, 'mic', mic_chunk)
+
+    fake_handle.stopped_unexpectedly = 'connection interruption'
+
+    with caplog.at_level('WARNING'):
+        path = recorder.stop_recording_and_save()
+
+    with sf.SoundFile(path, mode='r') as f:
+        assert len(f) >= SAMPLE_RATE
+    assert 'connection interruption' in caplog.text
+
+
+# --- Two-channel silence monitoring ------------------------------------------
+
+def _init_silence_state():
+    recorder._state['mic_silence_buffer'] = np.zeros((0, 1), dtype='float32')
+    recorder._state['mic_silence_buffer_lock'] = threading.Lock()
+    recorder._state['sys_silence_buffer'] = np.zeros((0, 1), dtype='float32')
+    recorder._state['sys_silence_buffer_lock'] = threading.Lock()
+    recorder._state['last_chunk_at'] = {'mic': None, 'sys': None}
+    recorder._state['mic_paused'] = False
+
+
+def _clear_silence_state():
+    recorder._state['mic_silence_buffer'] = None
+    recorder._state['mic_silence_buffer_lock'] = None
+    recorder._state['sys_silence_buffer'] = None
+    recorder._state['sys_silence_buffer_lock'] = None
+    recorder._state['last_chunk_at'] = None
+    recorder._state['mic_paused'] = False
+
+
+def test_silence_monitor_warns_independently_per_channel(monkeypatch):
+    _init_silence_state()
+
+    warning_hook = MagicMock()
+    monkeypatch.setattr(recorder, 'on_silence_warning', warning_hook)
+    monkeypatch.setattr(recorder, '_silence_window_seconds', lambda: 0.0)
+    monkeypatch.setattr(recorder, '_silence_rms_threshold', lambda: 0.001)
+    monkeypatch.setattr(recorder, 'MIC_SILENCE_GRACE_SECONDS', 0.0)
+
+    recorder._append_to_silence_buffer('mic', np.zeros((10, 1), dtype='float32'))
+    recorder._append_to_silence_buffer('sys', np.full((10, 1), 0.5, dtype='float32'))
+
+    stop_event = threading.Event()
+    thread = threading.Thread(target=recorder._silence_monitor_loop, args=(stop_event,), daemon=True)
+    thread.start()
+    import time as _time
+    _time.sleep(recorder.SILENCE_CHECK_INTERVAL_SECONDS * 2.5)
+    stop_event.set()
+    thread.join(timeout=2)
+
+    warning_hook.assert_called_once_with('mic')
+
+    _clear_silence_state()
+
+
+def test_silence_monitor_reports_recovery(monkeypatch):
+    _init_silence_state()
+
+    warning_hook = MagicMock()
+    recovered_hook = MagicMock()
+    monkeypatch.setattr(recorder, 'on_silence_warning', warning_hook)
+    monkeypatch.setattr(recorder, 'on_silence_recovered', recovered_hook)
+    monkeypatch.setattr(recorder, '_silence_window_seconds', lambda: 0.0)
+    monkeypatch.setattr(recorder, '_silence_rms_threshold', lambda: 0.001)
+    monkeypatch.setattr(recorder, 'MIC_SILENCE_GRACE_SECONDS', 0.0)
+
+    recorder._append_to_silence_buffer('sys', np.full((10, 1), 0.5, dtype='float32'))
+
+    stop_event = threading.Event()
+    thread = threading.Thread(target=recorder._silence_monitor_loop, args=(stop_event,), daemon=True)
+    thread.start()
+    import time as _time
+    _time.sleep(recorder.SILENCE_CHECK_INTERVAL_SECONDS * 2.5)
+
+    recorder._append_to_silence_buffer('mic', np.full((10, 1), 0.5, dtype='float32'))
+    _time.sleep(recorder.SILENCE_CHECK_INTERVAL_SECONDS * 1.5)
+
+    stop_event.set()
+    thread.join(timeout=2)
+
+    warning_hook.assert_called_once_with('mic')
+    recovered_hook.assert_called_once_with('mic')
+
+    _clear_silence_state()
+
+
+def test_silence_monitor_no_warning_while_channel_active(monkeypatch):
+    _init_silence_state()
+
+    warning_hook = MagicMock()
+    monkeypatch.setattr(recorder, 'on_silence_warning', warning_hook)
+    monkeypatch.setattr(recorder, '_silence_window_seconds', lambda: 0.0)
+    monkeypatch.setattr(recorder, '_silence_rms_threshold', lambda: 0.001)
+    monkeypatch.setattr(recorder, 'MIC_SILENCE_GRACE_SECONDS', 0.0)
+
+    recorder._append_to_silence_buffer('mic', np.full((10, 1), 0.5, dtype='float32'))
+    recorder._append_to_silence_buffer('sys', np.full((10, 1), 0.5, dtype='float32'))
+
+    stop_event = threading.Event()
+    thread = threading.Thread(target=recorder._silence_monitor_loop, args=(stop_event,), daemon=True)
+    thread.start()
+    import time as _time
+    _time.sleep(recorder.SILENCE_CHECK_INTERVAL_SECONDS * 2.5)
+    stop_event.set()
+    thread.join(timeout=2)
+
+    warning_hook.assert_not_called()
+
+    _clear_silence_state()
+
+
+def test_silence_monitor_warns_when_device_stops_delivering_chunks(monkeypatch):
+    '''A device that is physically unplugged mid-recording (e.g. a USB microphone) stops
+    calling back entirely - PortAudio never delivers another chunk, silent or otherwise - so
+    the RMS buffer is stuck holding loud pre-disconnect audio and would never read as silent
+    on its own. The monitor must fall back to "no new chunk for a while" instead.'''
+    _init_silence_state()
+
+    warning_hook = MagicMock()
+    monkeypatch.setattr(recorder, 'on_silence_warning', warning_hook)
+    monkeypatch.setattr(recorder, '_silence_window_seconds', lambda: 0.0)
+    monkeypatch.setattr(recorder, '_silence_rms_threshold', lambda: 0.001)
+    monkeypatch.setattr(recorder, 'MIC_SILENCE_GRACE_SECONDS', 0.0)
+
+    # Loud content, but no fresh timestamp (last_chunk_at['mic'] stays None) - simulates the
+    # last chunk received before the device disappeared, well before the monitor loop starts
+    # checking, so the channel is stale from its very first evaluation.
+    recorder._state['mic_silence_buffer'] = np.full((10, 1), 0.5, dtype='float32')
+    recorder._append_to_silence_buffer('sys', np.full((10, 1), 0.5, dtype='float32'))
+
+    stop_event = threading.Event()
+    thread = threading.Thread(target=recorder._silence_monitor_loop, args=(stop_event,), daemon=True)
+    thread.start()
+    import time as _time
+    _time.sleep(recorder.SILENCE_CHECK_INTERVAL_SECONDS * 2.5)
+    stop_event.set()
+    thread.join(timeout=2)
+
+    warning_hook.assert_called_once_with('mic')
+
+    _clear_silence_state()
+
+
+def test_silence_monitor_skips_mic_while_paused_for_switch(monkeypatch):
+    '''While the microphone is deliberately paused for a device switch, no new chunks arrive
+    either - but that is already surfaced via the menu bar's "paused" attention reason, so the
+    silence monitor should not pile on a second, confusing "microphone is silent" warning.'''
+    _init_silence_state()
+    recorder._state['mic_paused'] = True
+
+    warning_hook = MagicMock()
+    monkeypatch.setattr(recorder, 'on_silence_warning', warning_hook)
+    monkeypatch.setattr(recorder, '_silence_window_seconds', lambda: 0.0)
+    monkeypatch.setattr(recorder, '_silence_rms_threshold', lambda: 0.001)
+    monkeypatch.setattr(recorder, 'MIC_SILENCE_GRACE_SECONDS', 0.0)
+
+    recorder._append_to_silence_buffer('sys', np.full((10, 1), 0.5, dtype='float32'))
+
+    stop_event = threading.Event()
+    thread = threading.Thread(target=recorder._silence_monitor_loop, args=(stop_event,), daemon=True)
+    thread.start()
+    import time as _time
+    _time.sleep(recorder.SILENCE_CHECK_INTERVAL_SECONDS * 2.5)
+    stop_event.set()
+    thread.join(timeout=2)
+
+    warning_hook.assert_not_called()
+
+    _clear_silence_state()
+
+
+def test_mic_callback_logs_nonempty_status(tmp_path, monkeypatch, caplog):
+    _start_recording_with_stubs(tmp_path, monkeypatch)
+    mic_callback = recorder._state['mic_callback']
+
+    with caplog.at_level('WARNING'):
+        mic_callback(np.zeros((10, 1), dtype='float32'), 10, None, 'input overflow')
+
+    assert 'input overflow' in caplog.text
+    recorder.stop_recording_and_save()
+
+
+def test_mic_callback_silent_on_empty_status(tmp_path, monkeypatch, caplog):
+    _start_recording_with_stubs(tmp_path, monkeypatch)
+    mic_callback = recorder._state['mic_callback']
+
+    with caplog.at_level('WARNING'):
+        mic_callback(np.zeros((10, 1), dtype='float32'), 10, None, '')
+
+    assert caplog.text == ''
+    recorder.stop_recording_and_save()
+
+
+# --- Microphone pause/resume --------------------------------------------------
+
+def test_pause_mic_leaves_sys_capture_running(tmp_path, monkeypatch):
+    mic_stream, fake_handle = _start_recording_with_stubs(tmp_path, monkeypatch)
+
+    recorder.pause_mic()
+
+    mic_stream.stop.assert_called_once()
+    mic_stream.close.assert_called_once()
+    assert recorder._state['mic_stream'] is None
+    assert recorder._state['mic_paused'] is True
+    assert recorder._state['sys_handle'] is fake_handle
+
+    recorder.stop_recording_and_save()
+
+
+def test_resume_mic_writes_to_same_mic_wav(tmp_path, monkeypatch):
+    _start_recording_with_stubs(tmp_path, monkeypatch)
+    mic_temp_path = recorder._state['mic_temp_path']
+
+    recorder.pause_mic()
+
+    new_stream = MagicMock()
+    monkeypatch.setattr(recorder.sd, 'InputStream', MagicMock(return_value=new_stream))
+
+    resumed_device = recorder.resume_mic(device=2)
+
+    assert resumed_device == 2
+    new_stream.start.assert_called_once()
+    assert recorder._state['mic_stream'] is new_stream
+    assert recorder._state['mic_paused'] is False
+    assert recorder._state['mic_temp_path'] == mic_temp_path
+
+    recorder.stop_recording_and_save()
+
+
+def test_resume_mic_falls_back_to_previous_device_when_abandoned(tmp_path, monkeypatch):
+    _start_recording_with_stubs(tmp_path, monkeypatch)
+    original_device = recorder._state['last_mic_device']
+
+    recorder.pause_mic()
+
+    new_stream = MagicMock()
+    input_stream_spy = MagicMock(return_value=new_stream)
+    monkeypatch.setattr(recorder.sd, 'InputStream', input_stream_spy)
+
+    recorder.resume_mic(device=None)
+
+    _, kwargs = input_stream_spy.call_args
+    assert kwargs['device'] == original_device
+
+    recorder.stop_recording_and_save()
+
+
+def test_list_input_devices_refused_while_capture_active(tmp_path, monkeypatch):
+    _start_recording_with_stubs(tmp_path, monkeypatch)
+
+    with pytest.raises(RuntimeError, match='active'):
+        recorder.list_input_devices()
+
+    recorder.stop_recording_and_save()
+
+
+def test_list_input_devices_returns_inputs_while_paused(tmp_path, monkeypatch):
+    _start_recording_with_stubs(tmp_path, monkeypatch)
+    recorder.pause_mic()
+
+    terminate_spy = MagicMock()
+    initialize_spy = MagicMock()
+    monkeypatch.setattr(recorder.sd, '_terminate', terminate_spy)
+    monkeypatch.setattr(recorder.sd, '_initialize', initialize_spy)
+    monkeypatch.setattr(recorder.sd, 'query_devices', MagicMock(return_value=[
+        {'name': 'Built-in Mic', 'max_input_channels': 1},
+        {'name': 'Speakers', 'max_input_channels': 0},
+        {'name': 'AirPods', 'max_input_channels': 1},
+    ]))
+
+    devices = recorder.list_input_devices()
+
+    terminate_spy.assert_called_once()
+    initialize_spy.assert_called_once()
+    assert devices == [
+        {'index': 0, 'name': 'Built-in Mic'},
+        {'index': 2, 'name': 'AirPods'},
+    ]
+
+    recorder.resume_mic()
+    recorder.stop_recording_and_save()
+
+
+def test_resume_mic_failure_falls_back_without_stopping_recording(tmp_path, monkeypatch):
+    _start_recording_with_stubs(tmp_path, monkeypatch)
+    recorder.pause_mic()
+
+    fallback_stream = MagicMock()
+
+    def fake_input_stream(*args, **kwargs):
+        if kwargs.get('device') == 99:
+            raise RuntimeError('unsupported sample rate')
+        return fallback_stream
+
+    monkeypatch.setattr(recorder.sd, 'InputStream', MagicMock(side_effect=fake_input_stream))
+
+    with pytest.raises(recorder.MicResumeFallbackError):
+        recorder.resume_mic(device=99)
+
+    assert recorder._state['mic_stream'] is fallback_stream
+    assert recorder._state['mic_paused'] is False
+    fallback_stream.start.assert_called_once()
+
+    recorder.stop_recording_and_save()
 
 
 def test_discard_recording_removes_temp_dir_without_writing_output(tmp_path, monkeypatch):
