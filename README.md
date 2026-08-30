@@ -150,9 +150,10 @@ It uses the same capture logic as `python main.py record` (requires the
 - A native macOS notification if the system-audio channel is detected as silent for a sustained
   period, or if no system-audio buffers arrive at all shortly after starting (both point at the
   Screen Recording permission — see setup above).
-- A native macOS notification if a background transcription fails (see
-  [Transcription](#transcription) below); the app keeps running and the original recording is
-  left untouched, so it can be retried later via the `transcribe` CLI command.
+- A native macOS notification once a background transcription has failed every automatic retry
+  (see [Transcription](#transcription) below); intermediate failures retry silently. The app
+  keeps running and the original recording is left untouched, so it can still be reprocessed
+  manually via the `transcribe` CLI command.
 
 The app runs attached to the terminal it was launched from (no `.app` bundle / Finder launch yet)
 and must be started manually each time — it does not launch at login.
@@ -167,6 +168,22 @@ OpenAI-compatible `/audio/transcriptions` endpoint, generates a short title and 
 summary via separate LLM chat calls, and writes both as Markdown files. The source `.wav` is
 never deleted, moved, or renamed by this process, regardless of success or failure — a failed or
 skipped transcription can always be re-run later.
+
+### Retries
+
+Transcription failures are retried in two layers:
+
+- **Immediate retries** apply everywhere, including the CLI: a transcription request that fails
+  with a transient error (a timeout, a connection error, or an HTTP 429/5xx) is retried up to 3
+  times with a short backoff. Errors a retry can't fix — an invalid or missing API key, or any
+  other 4xx — skip the retries and fail straight away.
+- **Deferred retries** apply **only in the menu bar app**, which is long-running enough to retry
+  later. A transcription that still fails is queued in `~/.config/meet-recorder/pending_transcriptions.json`
+  and retried once an hour, both for recordings stopped normally and for crash-recovered ones.
+  Nothing is shown while retries continue; the failure notification fires exactly once, when
+  `transcription_max_retries` attempts are spent. Deleting the source `.wav` ends its retry loop.
+  A CLI run has no such process behind it, so a failed `transcribe` command stays terminal — the
+  source `.wav` is untouched and the command can simply be re-run.
 
 ### Requirements
 
@@ -191,6 +208,7 @@ adjust it. All fields are required unless noted otherwise:
 | `summary_dir` | Directory where summary Markdown files are written, in `YYYY-MM` per-month subfolders. |
 | `chunk_duration` | *(optional, default `420`, i.e. 7 minutes)* Seconds per chunk; longer recordings are split into sequential, non-overlapping chunks before transcription. |
 | `base_url` | *(optional, default `https://openrouter.ai/api/v1`)* Base URL of the OpenAI-compatible API used for both transcription and chat completions. |
+| `transcription_max_retries` | *(optional, default `72`)* How many attempts a failed transcription gets before it is abandoned and the failure notification fires. Menu bar app only; at the fixed hourly retry interval the default spans roughly 3 days. |
 
 Output files are named `TIMESTAMP - Title-Slug.md`, where `TIMESTAMP` and the `YYYY-MM` folder
 are derived from the recording's start time (parsed from the `.wav` filename), and `Title-Slug`

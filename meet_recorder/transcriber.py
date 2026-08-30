@@ -6,6 +6,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 from datetime import datetime
 from html.parser import HTMLParser
 
@@ -23,6 +24,11 @@ AUDIO_BITRATE = '32k'
 TITLE_MAX_LENGTH = 60
 TITLE_MAX_ATTEMPTS = 3
 EVENT_DESCRIPTION_MAX_LENGTH = 500
+TRANSCRIPTION_MAX_ATTEMPTS = 3
+# Backoff before attempt 2 and attempt 3 respectively: short enough not to stall the
+# background thread, long enough to ride out a brief blip.
+TRANSCRIPTION_RETRY_BACKOFF_SECONDS = (2, 5)
+RETRYABLE_STATUS_CODES = (429,)
 FILENAME_TIMESTAMP_FORMAT = '%Y-%m-%d_%H-%M-%S'
 MONTH_FORMAT = '%Y-%m'
 
@@ -97,6 +103,37 @@ def _split_into_chunks(mp3_path, chunk_duration):
     return chunks
 
 
+def _is_retryable(error):
+    '''True for failures a short wait plausibly resolves: timeouts, network errors, 429/5xx.'''
+    if isinstance(error, (httpx.TimeoutException, httpx.NetworkError)):
+        return True
+    if isinstance(error, httpx.HTTPStatusError):
+        status = error.response.status_code
+        return status in RETRYABLE_STATUS_CODES or status >= 500
+    return False
+
+
+def _post_with_retry(url, payload, headers):
+    '''POST the transcription request, retrying retryable failures up to the attempt limit.
+
+    Non-retryable failures (4xx other than 429, and anything else) raise on the first
+    attempt without consuming the remaining budget.'''
+    for attempt in range(1, TRANSCRIPTION_MAX_ATTEMPTS + 1):
+        try:
+            response = httpx.post(url, json=payload, headers=headers, timeout=120)
+            response.raise_for_status()
+            return response
+        except httpx.HTTPError as e:
+            if not _is_retryable(e) or attempt == TRANSCRIPTION_MAX_ATTEMPTS:
+                raise TranscriptionError(f'Transcription request failed: {e}')
+            backoff = TRANSCRIPTION_RETRY_BACKOFF_SECONDS[attempt - 1]
+            logger.warning(
+                f'Transcription request failed ({e}); '
+                f'retrying in {backoff}s (attempt {attempt + 1}/{TRANSCRIPTION_MAX_ATTEMPTS})'
+            )
+            time.sleep(backoff)
+
+
 def _transcribe_chunk(chunk_path, config, event=None):
     with open(chunk_path, 'rb') as f:
         audio_b64 = base64.b64encode(f.read()).decode('ascii')
@@ -114,13 +151,11 @@ def _transcribe_chunk(chunk_path, config, event=None):
         payload['prompt'] = prompt
 
     url = f'{config.base_url.rstrip("/")}/audio/transcriptions'
+    # A missing API key raises TranscriptionError here, before any request is made,
+    # so it never consumes a retry attempt.
     headers = {'Authorization': f'Bearer {_api_key()}', 'Content-Type': 'application/json'}
 
-    try:
-        response = httpx.post(url, json=payload, headers=headers, timeout=120)
-        response.raise_for_status()
-    except httpx.HTTPError as e:
-        raise TranscriptionError(f'Transcription request failed: {e}')
+    response = _post_with_retry(url, payload, headers)
 
     return response.json().get('text', '')
 

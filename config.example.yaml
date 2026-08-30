@@ -40,6 +40,11 @@ chunk_duration: 420
 # Base URL of the OpenAI-compatible API used for both STT and chat completions.
 base_url: https://openrouter.ai/api/v1
 
+# Max attempts before a failed transcription is abandoned and the failure is notified.
+# Only used by the menu bar app, which retries deferred transcriptions once an hour, so
+# this count is also the retry window in hours. Optional; default 72 (~3 days).
+# transcription_max_retries: 72
+
 # --- Google Calendar integration (OPTIONAL) ---------------------------------
 # Entirely optional. If the `calendars:` list below is omitted, the calendar
 # feature is disabled and the app behaves exactly as without it: transcription

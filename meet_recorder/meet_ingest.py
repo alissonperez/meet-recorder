@@ -59,7 +59,7 @@ def ingest_once(config, on_access_error=None):
 
     written = []
     for event in events:
-        if ledger.should_skip(event.id):
+        if ledger.MEET_LEDGER.should_skip(event.id):
             logger.debug(f'"{event.title}": skipped (ledger)')
             continue
 
@@ -69,7 +69,7 @@ def ingest_once(config, on_access_error=None):
             # A scope error hits every occurrence at once: abort the run, penalize no one.
             raise
         except drive.DriveAccessError as e:
-            entry = ledger.record_access_failure(event.id, config.meet_transcripts.max_access_retries)
+            entry = ledger.MEET_LEDGER.record_failure(event.id, config.meet_transcripts.max_access_retries)
             logger.warning(f'"{event.title}": transcript not accessible ({e}); status={entry.status}')
             if entry.attempts == 1 and on_access_error is not None:
                 on_access_error(event)
@@ -81,7 +81,7 @@ def ingest_once(config, on_access_error=None):
         if result is None:
             continue
 
-        ledger.mark_done(event.id)
+        ledger.MEET_LEDGER.mark_done(event.id)
         logger.info(f'"{event.title}": ingested -> {result["transcript_path"]}')
         written.append(result)
 
