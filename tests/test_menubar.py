@@ -537,6 +537,31 @@ def test_scan_retries_a_due_entry_and_marks_it_done(app, retry, monkeypatch):
     retry.mark_done.assert_called_once_with(retry.wav, app.config)
 
 
+def test_scan_starts_at_most_the_per_scan_limit(app, retry, monkeypatch):
+    limit = menubar_module.MAX_TRANSCRIPTION_RETRIES_PER_SCAN
+    retry.due_paths.return_value = [f'/tmp/rec-{i}.wav' for i in range(limit + 2)]
+    started = _capture_threads(monkeypatch)
+
+    app._run_transcription_retry_scan(sender=MagicMock())
+
+    assert len(started) == limit
+
+
+def test_scan_retries_the_oldest_due_entries_first(app, retry, monkeypatch):
+    limit = menubar_module.MAX_TRANSCRIPTION_RETRIES_PER_SCAN
+    due = [f'/tmp/rec-{i}.wav' for i in range(limit + 2)]
+    retry.due_paths.return_value = due
+    started = _capture_threads(monkeypatch)
+    attempted = []
+    monkeypatch.setattr(app, '_transcribe_recording', lambda path, **_: attempted.append(path))
+
+    app._run_transcription_retry_scan(sender=MagicMock())
+    for run in started:
+        run()
+
+    assert attempted == due[:limit]
+
+
 def test_scan_skips_a_recording_already_being_transcribed(app, retry):
     app._claim_transcription(retry.wav)
 

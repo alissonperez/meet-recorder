@@ -24,6 +24,10 @@ MEET_INGEST_FAILURE_NOTIFY_THRESHOLD = 3
 # Well under the ledger's 1h retry interval, so a due entry is picked up promptly;
 # a scan with nothing due is just one ledger read.
 TRANSCRIPTION_RETRY_SCAN_INTERVAL_SECONDS = 5 * 60
+# A scan can find a large backlog due at once (days offline, an expired API key). Each retry
+# runs a full chunked-LLM transcription, so cap how many start per scan instead of fanning out
+# one thread per due path; the rest are picked up by the next scan.
+MAX_TRANSCRIPTION_RETRIES_PER_SCAN = 3
 
 
 class MenubarApp(rumps.App):
@@ -485,10 +489,19 @@ class MenubarApp(rumps.App):
 
     def _run_transcription_retry_scan(self, sender):
         try:
-            paths = transcription_retry.due_paths(self.config)
+            due = transcription_retry.due_paths(self.config)
         except Exception as e:
             logger.warning(f'Deferred-transcription scan failed: {e}')
             return
+
+        # due_paths is ordered oldest deferral first, and every attempt bumps its ledger
+        # timestamp, so a backlog drains oldest-first across scans without starving anyone.
+        paths = due[:MAX_TRANSCRIPTION_RETRIES_PER_SCAN]
+        if len(due) > len(paths):
+            logger.info(
+                f'{len(due)} deferred transcriptions due; starting {len(paths)}, '
+                'remaining left for the next scan'
+            )
 
         for path in paths:
             logger.info(f'Retrying deferred transcription for {path}')
