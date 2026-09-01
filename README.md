@@ -168,15 +168,21 @@ Recordings are saved as stereo `.wav` files in `RECORDINGS_DIR` (default `~/Meet
 2026-07-09_14-30-00 - Weekly-Planning.wav
 ```
 
-With [Google Calendar](#google-calendar-optional) configured, the matching event's title is
-slugified (same rules and 80-character cap as the transcript/summary filenames) and appended after
-a ` - ` separator, so a recording can be found by meeting name. When no event matches — calendar
-integration disabled, the lookup fails, or nothing falls in the match window — the file keeps the
-plain timestamp name.
+A recording is always *saved* under the plain timestamp name — the stop path makes no network call.
+Once [transcription](#transcription) finishes successfully, the recording is renamed to carry the
+same title its transcript and summary carry: the meeting title slugified with the same rules and
+80-character cap, after a ` - ` separator. The `.wav` keeps its own timestamp format, so it does not
+match the Markdown filenames character for character, but both name the same meeting.
 
-The audio is always written to disk under the plain timestamp name first and only then renamed, so
-no calendar or naming failure can cost you a recording. Existing untitled recordings keep working
-unchanged; nothing already on disk is renamed.
+The title is whichever one the transcription actually used — the calendar event's when one matched,
+otherwise the LLM-generated one — so the audio and its transcript never disagree. A recording that
+never completes a transcription keeps its bare timestamp: that includes **Parar sem transcrever**
+and a transcription abandoned after exhausting its retries.
+
+The rename is the last step and only ever runs after both output files are written, so nothing it
+can do puts a recording or a transcript at risk; if it fails, it is logged and the recording keeps
+the name it had. Nothing already on disk is renamed by upgrading, and an untitled recording
+transcribes exactly as before.
 
 ## Transcription
 
@@ -185,9 +191,11 @@ be transcribed into a full-text Markdown transcript plus an LLM-generated Markdo
 pipeline: downmixes/compresses the recording's `.wav` to mono mp3 via `ffmpeg`, splits it into
 chunks if it's longer than the configured chunk duration, transcribes each chunk via an
 OpenAI-compatible `/audio/transcriptions` endpoint, generates a short title and a structured
-summary via separate LLM chat calls, and writes both as Markdown files. The source `.wav` is
-never deleted, moved, or renamed by this process, regardless of success or failure — a failed or
-skipped transcription can always be re-run later.
+summary via separate LLM chat calls, and writes both as Markdown files. The source `.wav` is never
+deleted, moved, or modified by this process, regardless of success or failure — a failed or skipped
+transcription can always be re-run later. Its only effect on the recording is the final rename, once
+both output files are written, that gives it the meeting's title (see
+[Recording files](#recording-files)); a run that fails leaves the filename untouched.
 
 ### Retries
 
@@ -315,13 +323,12 @@ within the winning tier, the closest event by start-time distance across all acc
 
 When an event matches:
 
-- its title drives both the transcript and summary **filenames** and the `title:` frontmatter (and
-  the LLM title call is skipped);
+- its title drives the transcript and summary **filenames**, the recording's own filename (see
+  [Recording files](#recording-files)), and the `title:` frontmatter (and the LLM title call is
+  skipped);
 - the frontmatter also gains `calendar`, `event_start`, `event_end`, and `attendees` fields;
 - the event title + attendee names are prepended to the summary prompt for context.
 
-The same lookup also runs when a recording is *saved*, to name the `.wav` itself — see
-[Recording files](#recording-files).
 
 Events you've **declined** are ignored, as are events whose slugified title contains any entry in
 `ignored_event_slugs`:

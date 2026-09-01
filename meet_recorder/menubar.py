@@ -541,6 +541,9 @@ class MenubarApp(rumps.App):
             asyncio.run(transcriber.transcribe(path))
             logger.info(f'Transcription finished for {path}')
             if is_retry:
+                # Deliberately the pre-rename path: a successful run renames the recording to
+                # carry its title, but the ledger entry was created under the path this retry
+                # started with, so that is the key that has to be cleared.
                 transcription_retry.mark_done(path, self.config)
         except Exception as e:
             self._defer_transcription(path, e)

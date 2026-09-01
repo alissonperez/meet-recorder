@@ -37,33 +37,63 @@ The test suite SHALL verify `meet_recorder.transcriber`'s pure filename/timestam
 
 ## ADDED Requirements
 
-### Requirement: Recording title rename is verified
-The test suite SHALL verify the recorder's post-merge titling step against real files in a temporary directory, with the calendar lookup mocked so no network call occurs. Every scenario SHALL assert that a complete recording remains on disk afterwards, since the step's purpose is to never put a saved recording at risk.
+### Requirement: Meeting title slugification is verified
+The test suite SHALL verify the shared helper that turns a meeting title into the slug used in both the recording filename and the transcript/summary filenames, covering length capping, filesystem-unsafe characters, and titles that yield no usable slug.
 
-#### Scenario: Matched event title renames the recording
-- **WHEN** the titling step runs on a merged `<timestamp>.wav` while the mocked calendar lookup returns an event
-- **THEN** the file is renamed to the start timestamp, the ` - ` separator, the slugified event title and the `.wav` extension, that path is returned, and the file's contents are unchanged
+#### Scenario: Normal title is slugified with its case preserved
+- **WHEN** the helper is called with an ordinary multi-word title
+- **THEN** it returns that title slugified with its capitalization preserved
 
-#### Scenario: No matched event leaves the file untouched
-- **WHEN** the titling step runs while the mocked calendar lookup returns no event
-- **THEN** the file keeps its bare `<timestamp>.wav` name, that path is returned, and no rename is attempted
+#### Scenario: Overlong title is truncated to the cap
+- **WHEN** the helper is called with a title longer than the slug length cap
+- **THEN** the returned slug is exactly the cap in length
 
-#### Scenario: Calendar lookup error is absorbed
-- **WHEN** the titling step runs while the mocked calendar lookup raises
-- **THEN** no exception propagates, the untitled path is returned, and the recording is still present and intact
+#### Scenario: Path-unsafe characters are stripped
+- **WHEN** the helper is called with a title containing characters such as `/`, `:`, or quotes
+- **THEN** none of those characters appear in the returned slug
 
-#### Scenario: Rename failure is absorbed
-- **WHEN** the titling step runs and the rename itself fails
-- **THEN** no exception propagates, the untitled path is returned, and the recording is still present and intact
+#### Scenario: Title with no usable characters yields an empty slug
+- **WHEN** the helper is called with an empty title, or one consisting only of punctuation
+- **THEN** it returns an empty string, so callers can treat "no usable title" as a single case
+
+### Requirement: Post-success recording rename is verified
+The test suite SHALL verify the transcription pipeline's final rename step against real files in a temporary directory, with the transcription, summary, and title network calls mocked so no network call occurs. Every scenario SHALL assert that a complete recording remains on disk afterwards and that the transcript and summary files written by the run are present and unchanged, since the step runs after the run's real work is already done and must never put it at risk.
+
+#### Scenario: Successful run renames the recording to the run's title
+- **WHEN** a mocked-out transcription run completes successfully for a recording named with a bare start timestamp
+- **THEN** the recording is renamed to that start timestamp, the ` - ` separator, the same title slug the transcript and summary carry, and the `.wav` extension, and its contents are unchanged
+
+#### Scenario: Recording already carrying the title is not renamed
+- **WHEN** a successful run's title matches the title already in the recording's filename
+- **THEN** no rename occurs and the recording keeps its filename
+
+#### Scenario: Rename failure leaves a successful run successful
+- **WHEN** the rename itself fails after the output files have been written
+- **THEN** no exception propagates, the run's result is returned as a success, and the recording is still present and intact at its pre-rename path
 
 #### Scenario: Existing destination is not overwritten
-- **WHEN** the titling step runs and a file already occupies the titled destination path
-- **THEN** the recording keeps its untitled name and the pre-existing file's contents are unchanged
+- **WHEN** a file already occupies the path the recording would be renamed to
+- **THEN** the recording keeps its current name and the pre-existing file's contents are unchanged
 
-#### Scenario: Audio is on disk before the calendar lookup runs
-- **WHEN** a merge-and-save runs with the calendar lookup mocked to inspect the filesystem when it is called
-- **THEN** the complete merged recording is already present at the untitled path at that moment
+#### Scenario: Title that slugifies to nothing leaves the name alone
+- **WHEN** a successful run's title slugifies to an empty string
+- **THEN** no rename occurs and the recording keeps its filename, with no trailing separator added
 
-#### Scenario: Overlong or unsafe title is bounded
-- **WHEN** the titling step runs for an event whose title exceeds the title length limit or contains path-unsafe characters
-- **THEN** the resulting filename's title portion is truncated to the limit, contains no path separators or other unsafe characters, and the file lands in the recordings directory rather than a nested path
+#### Scenario: Recording with no parseable timestamp prefix is not renamed
+- **WHEN** a successful run completes for a recording whose filename does not begin with a parseable timestamp
+- **THEN** no rename occurs and the recording keeps the filename it had
+
+#### Scenario: Failed run does not rename the recording
+- **WHEN** a transcription run fails at any step before the output files are written
+- **THEN** the recording is still at its original path with its original name
+
+#### Scenario: Outputs are written before the rename is attempted
+- **WHEN** a successful run is observed at the moment the rename is performed
+- **THEN** the transcript and summary files are already present and complete on disk
+
+### Requirement: Deferred retry over a renamed recording is verified
+The test suite SHALL verify that a deferred transcription retry which succeeds and renames its recording still clears the ledger entry created under the recording's pre-rename path, with the transcription pipeline mocked so no network call occurs.
+
+#### Scenario: Succeeding retry clears the entry it was keyed by
+- **WHEN** a deferred retry runs for a recording, the mocked pipeline succeeds, and the recording is renamed as the run's final step
+- **THEN** the deferred-retry entry is marked done under the path the retry was started with, leaving no entry that a later scan could retry

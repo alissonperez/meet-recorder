@@ -10,8 +10,7 @@ import numpy as np
 import sounddevice as sd
 import soundfile as sf
 
-from meet_recorder import calendar, naming, sck_capture
-from meet_recorder.config import load_config
+from meet_recorder import sck_capture
 
 logger = logging.getLogger(__name__)
 
@@ -567,40 +566,6 @@ def _merge_to_stereo(mic_path, sys_path, output_path):
                     break
 
 
-def _apply_meeting_title(path, timestamp):
-    '''Renames an already-merged '<timestamp>.wav' to '<timestamp> - <slug>.wav' using the
-    calendar event matching the recording's start, and returns the resulting path.
-
-    Titling is cosmetic and runs only once the audio is durably on disk, so it must never cost
-    the user a recording: every failure - an unparseable timestamp, no matching event, a title
-    that slugifies to nothing, a taken destination, a calendar or rename error - is logged and
-    returns `path` unchanged, leaving the complete untitled recording in place.'''
-    try:
-        start = datetime.strptime(timestamp, TIMESTAMP_FORMAT)
-        event = calendar.find_event(start, load_config())
-        if event is None:
-            return path
-
-        slug = naming.slugify_title(event.title)
-        if not slug:
-            return path
-
-        titled_path = os.path.join(os.path.dirname(path), f'{timestamp} - {slug}.wav')
-
-        # os.rename() replaces the destination silently on POSIX. A collision needs two
-        # recordings sharing a start second *and* a title, but the cost of being wrong is a
-        # destroyed recording, so check rather than rely on it never happening.
-        if os.path.exists(titled_path):
-            logger.warning(f'Not renaming {path} to {titled_path}: destination already exists')
-            return path
-
-        os.rename(path, titled_path)
-        return titled_path
-    except Exception as e:
-        logger.warning(f'Could not apply the meeting title to {path}: {e}')
-        return path
-
-
 def merge_and_cleanup(mic_path, sys_path, temp_dir):
     timestamp = os.path.basename(os.path.normpath(temp_dir))
     path = _build_output_path(timestamp)
@@ -610,9 +575,7 @@ def merge_and_cleanup(mic_path, sys_path, temp_dir):
     if temp_dir:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
-    # Only now that the audio is complete on disk, and the temp files it came from are gone,
-    # is it safe to make a network call for the title.
-    return _apply_meeting_title(path, timestamp)
+    return path
 
 
 def _teardown_capture():

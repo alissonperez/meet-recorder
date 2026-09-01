@@ -27,11 +27,8 @@ TRANSCRIPTION_MAX_ATTEMPTS = 3
 # background thread, long enough to ride out a brief blip.
 TRANSCRIPTION_RETRY_BACKOFF_SECONDS = (2, 5)
 RETRYABLE_STATUS_CODES = (429,)
-FILENAME_TIMESTAMP_FORMAT = '%Y-%m-%d_%H-%M-%S'
-# FILENAME_TIMESTAMP_FORMAT renders at a fixed width, so the timestamp that prefixes a
-# recording filename can be sliced off unambiguously whether or not a meeting-title suffix
-# follows it. Derived from the format itself so the two cannot drift apart.
-FILENAME_TIMESTAMP_LENGTH = len(datetime(2000, 1, 1).strftime(FILENAME_TIMESTAMP_FORMAT))
+# Owned by naming.py, which also builds the renamed filenames this has to keep parsing.
+FILENAME_TIMESTAMP_FORMAT = naming.RECORDING_TIMESTAMP_FORMAT
 MONTH_FORMAT = '%Y-%m'
 
 
@@ -258,12 +255,14 @@ def _generate_summary(transcript_text, config, event=None, summary_prompt=None, 
 
 
 def _resolve_timestamp(wav_path):
-    stem = os.path.splitext(os.path.basename(wav_path))[0]
-
-    try:
-        return datetime.strptime(stem[:FILENAME_TIMESTAMP_LENGTH], FILENAME_TIMESTAMP_FORMAT)
-    except ValueError:
+    # Only the prefix, so a recording a previous run renamed to '<timestamp> - Title.wav'
+    # still yields its true start time instead of falling back to the mtime - i.e. the moment
+    # the recording stopped, which would then drive calendar matching and the output names.
+    prefix = naming.timestamp_prefix(wav_path)
+    if prefix is None:
         return datetime.fromtimestamp(os.path.getmtime(wav_path))
+
+    return datetime.strptime(prefix, FILENAME_TIMESTAMP_FORMAT)
 
 
 def _format_display_timestamp(timestamp):
@@ -345,7 +344,17 @@ async def transcribe(wav_path, config=None):
             _summary_markdown(title, summary_text, event),
         )
 
-        return {'transcript_path': transcript_path, 'summary_path': summary_path}
+        # Last step, and only now that both output files are written: the recording takes the
+        # title they were named with, so the audio and its transcript are findable under the
+        # same meeting name. Never raises - the run has already produced everything the user
+        # asked for, so a failure here is cosmetic and must not turn a success into a retry.
+        recording_path = naming.rename_recording_with_title(wav_path, title)
+
+        return {
+            'transcript_path': transcript_path,
+            'summary_path': summary_path,
+            'recording_path': recording_path,
+        }
     finally:
         if tmp_dir and os.path.isdir(tmp_dir):
             shutil.rmtree(tmp_dir, ignore_errors=True)
