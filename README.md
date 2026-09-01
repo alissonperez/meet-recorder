@@ -158,6 +158,26 @@ It uses the same capture logic as `python main.py record` (requires the
 The app runs attached to the terminal it was launched from (no `.app` bundle / Finder launch yet)
 and must be started manually each time — it does not launch at login.
 
+## Recording files
+
+Recordings are saved as stereo `.wav` files in `RECORDINGS_DIR` (default `~/MeetRecordings`, see
+`.env.example`), named after the moment the recording *started*, not when it was stopped:
+
+```
+2026-07-09_14-30-00.wav
+2026-07-09_14-30-00 - Weekly-Planning.wav
+```
+
+With [Google Calendar](#google-calendar-optional) configured, the matching event's title is
+slugified (same rules and 80-character cap as the transcript/summary filenames) and appended after
+a ` - ` separator, so a recording can be found by meeting name. When no event matches — calendar
+integration disabled, the lookup fails, or nothing falls in the match window — the file keeps the
+plain timestamp name.
+
+The audio is always written to disk under the plain timestamp name first and only then renamed, so
+no calendar or naming failure can cost you a recording. Existing untitled recordings keep working
+unchanged; nothing already on disk is renamed.
+
 ## Transcription
 
 After a recording is stopped (via **Parar** in the menu bar app, or manually via the CLI), it can
@@ -299,6 +319,9 @@ When an event matches:
   the LLM title call is skipped);
 - the frontmatter also gains `calendar`, `event_start`, `event_end`, and `attendees` fields;
 - the event title + attendee names are prepended to the summary prompt for context.
+
+The same lookup also runs when a recording is *saved*, to name the `.wav` itself — see
+[Recording files](#recording-files).
 
 Events you've **declined** are ignored, as are events whose slugified title contains any entry in
 `ignored_event_slugs`:

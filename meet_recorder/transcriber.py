@@ -12,9 +12,7 @@ from html.parser import HTMLParser
 
 import httpx
 from openai import OpenAI
-from slugify import slugify
-
-from meet_recorder import calendar, drive
+from meet_recorder import calendar, drive, naming
 from meet_recorder.config import load_config
 
 logger = logging.getLogger(__name__)
@@ -30,6 +28,10 @@ TRANSCRIPTION_MAX_ATTEMPTS = 3
 TRANSCRIPTION_RETRY_BACKOFF_SECONDS = (2, 5)
 RETRYABLE_STATUS_CODES = (429,)
 FILENAME_TIMESTAMP_FORMAT = '%Y-%m-%d_%H-%M-%S'
+# FILENAME_TIMESTAMP_FORMAT renders at a fixed width, so the timestamp that prefixes a
+# recording filename can be sliced off unambiguously whether or not a meeting-title suffix
+# follows it. Derived from the format itself so the two cannot drift apart.
+FILENAME_TIMESTAMP_LENGTH = len(datetime(2000, 1, 1).strftime(FILENAME_TIMESTAMP_FORMAT))
 MONTH_FORMAT = '%Y-%m'
 
 
@@ -259,7 +261,7 @@ def _resolve_timestamp(wav_path):
     stem = os.path.splitext(os.path.basename(wav_path))[0]
 
     try:
-        return datetime.strptime(stem, FILENAME_TIMESTAMP_FORMAT)
+        return datetime.strptime(stem[:FILENAME_TIMESTAMP_LENGTH], FILENAME_TIMESTAMP_FORMAT)
     except ValueError:
         return datetime.fromtimestamp(os.path.getmtime(wav_path))
 
@@ -270,7 +272,7 @@ def _format_display_timestamp(timestamp):
 
 def _build_base_filename(timestamp, title, suffix=None):
     ts_str = _format_display_timestamp(timestamp)
-    title_slug = slugify(title, lowercase=False)[:80]
+    title_slug = naming.slugify_title(title)
     suffix_str = f' {suffix}' if suffix else ''
 
     return f'{ts_str}{suffix_str} - {title_slug}'

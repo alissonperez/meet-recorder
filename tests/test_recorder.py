@@ -1,14 +1,24 @@
 import os
 import threading
+from datetime import datetime
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
 import soundfile as sf
 
-from meet_recorder import recorder
+from meet_recorder import naming, recorder
 
 SAMPLE_RATE = recorder.SAMPLE_RATE
+
+
+@pytest.fixture(autouse=True)
+def no_calendar_lookup(monkeypatch):
+    '''Keeps merge_and_cleanup's titling step off the network (and off the developer's real
+    config) by default. Titling tests override find_event themselves.'''
+    monkeypatch.setattr(recorder, 'load_config', lambda: SimpleNamespace(calendar_enabled=False))
+    monkeypatch.setattr(recorder.calendar, 'find_event', lambda anchor, config: None)
 
 
 def _write_mono_wav(path, samples, samplerate=SAMPLE_RATE):
@@ -207,6 +217,198 @@ def test_merge_and_cleanup_names_output_from_orphan_dir_timestamp(tmp_path, monk
 
     assert os.path.basename(output_path) == f'{start_timestamp}.wav'
     assert not os.path.exists(orphan_dir)
+
+
+START_TIMESTAMP = '2026-03-04_11-05-00'
+
+
+def _merged_recording(tmp_path, timestamp=START_TIMESTAMP, contents=b'merged-audio'):
+    recordings_dir = tmp_path / 'recordings'
+    recordings_dir.mkdir(exist_ok=True)
+    path = recordings_dir / f'{timestamp}.wav'
+    path.write_bytes(contents)
+    return path
+
+
+def _find_event_returning(monkeypatch, title):
+    monkeypatch.setattr(
+        recorder.calendar, 'find_event', lambda anchor, config: SimpleNamespace(title=title),
+    )
+
+
+def test_apply_meeting_title_renames_to_matched_event_title(tmp_path, monkeypatch):
+    path = _merged_recording(tmp_path)
+    _find_event_returning(monkeypatch, 'Weekly Planning')
+
+    result = recorder._apply_meeting_title(str(path), START_TIMESTAMP)
+
+    assert os.path.basename(result) == f'{START_TIMESTAMP} - Weekly-Planning.wav'
+    assert os.path.dirname(result) == os.path.dirname(str(path))
+    assert open(result, 'rb').read() == b'merged-audio'
+    assert not os.path.exists(path)
+
+
+def test_apply_meeting_title_passes_start_timestamp_as_the_calendar_anchor(tmp_path, monkeypatch):
+    path = _merged_recording(tmp_path)
+    anchors = []
+
+    def find_event(anchor, config):
+        anchors.append(anchor)
+        return None
+
+    monkeypatch.setattr(recorder.calendar, 'find_event', find_event)
+
+    recorder._apply_meeting_title(str(path), START_TIMESTAMP)
+
+    assert anchors == [datetime(2026, 3, 4, 11, 5, 0)]
+
+
+def test_apply_meeting_title_keeps_untitled_name_when_no_event_matches(tmp_path, monkeypatch):
+    path = _merged_recording(tmp_path)
+    monkeypatch.setattr(recorder.calendar, 'find_event', lambda anchor, config: None)
+
+    result = recorder._apply_meeting_title(str(path), START_TIMESTAMP)
+
+    assert result == str(path)
+    assert open(result, 'rb').read() == b'merged-audio'
+
+
+def test_apply_meeting_title_keeps_untitled_name_when_title_slugifies_to_nothing(tmp_path, monkeypatch):
+    path = _merged_recording(tmp_path)
+    _find_event_returning(monkeypatch, '!!! ???')
+
+    result = recorder._apply_meeting_title(str(path), START_TIMESTAMP)
+
+    assert result == str(path)
+    assert open(result, 'rb').read() == b'merged-audio'
+
+
+def test_apply_meeting_title_absorbs_calendar_lookup_error(tmp_path, monkeypatch):
+    path = _merged_recording(tmp_path)
+
+    def boom(anchor, config):
+        raise RuntimeError('calendar exploded')
+
+    monkeypatch.setattr(recorder.calendar, 'find_event', boom)
+
+    result = recorder._apply_meeting_title(str(path), START_TIMESTAMP)
+
+    assert result == str(path)
+    assert open(result, 'rb').read() == b'merged-audio'
+
+
+def test_apply_meeting_title_absorbs_config_load_error(tmp_path, monkeypatch):
+    path = _merged_recording(tmp_path)
+
+    def boom():
+        raise RuntimeError('no config file')
+
+    monkeypatch.setattr(recorder, 'load_config', boom)
+
+    result = recorder._apply_meeting_title(str(path), START_TIMESTAMP)
+
+    assert result == str(path)
+    assert open(result, 'rb').read() == b'merged-audio'
+
+
+def test_apply_meeting_title_absorbs_rename_failure(tmp_path, monkeypatch):
+    path = _merged_recording(tmp_path)
+    _find_event_returning(monkeypatch, 'Weekly Planning')
+
+    def boom(src, dst):
+        raise OSError('rename failed')
+
+    monkeypatch.setattr(recorder.os, 'rename', boom)
+
+    result = recorder._apply_meeting_title(str(path), START_TIMESTAMP)
+
+    assert result == str(path)
+    assert open(result, 'rb').read() == b'merged-audio'
+
+
+def test_apply_meeting_title_does_not_overwrite_an_existing_destination(tmp_path, monkeypatch):
+    path = _merged_recording(tmp_path)
+    _find_event_returning(monkeypatch, 'Weekly Planning')
+    existing = path.parent / f'{START_TIMESTAMP} - Weekly-Planning.wav'
+    existing.write_bytes(b'someone-elses-recording')
+
+    result = recorder._apply_meeting_title(str(path), START_TIMESTAMP)
+
+    assert result == str(path)
+    assert open(result, 'rb').read() == b'merged-audio'
+    assert existing.read_bytes() == b'someone-elses-recording'
+
+
+def test_apply_meeting_title_keeps_untitled_name_for_unparseable_timestamp(tmp_path, monkeypatch):
+    path = _merged_recording(tmp_path, timestamp='not-a-timestamp')
+    _find_event_returning(monkeypatch, 'Weekly Planning')
+
+    result = recorder._apply_meeting_title(str(path), 'not-a-timestamp')
+
+    assert result == str(path)
+    assert open(result, 'rb').read() == b'merged-audio'
+
+
+def test_apply_meeting_title_bounds_overlong_and_unsafe_titles(tmp_path, monkeypatch):
+    path = _merged_recording(tmp_path)
+    _find_event_returning(monkeypatch, 'Q3/Q4 "Roadmap": ' + 'Planning ' * 20)
+
+    result = recorder._apply_meeting_title(str(path), START_TIMESTAMP)
+
+    title_part = os.path.basename(result)[len(f'{START_TIMESTAMP} - '):-len('.wav')]
+    assert len(title_part) == naming.TITLE_SLUG_MAX_LENGTH
+    for unsafe in ('/', ':', '"', os.sep):
+        assert unsafe not in title_part
+    assert os.path.dirname(result) == str(tmp_path / 'recordings')
+    assert os.path.isfile(result)
+
+
+def test_merge_and_cleanup_applies_the_matched_meeting_title(tmp_path, monkeypatch):
+    monkeypatch.setenv('RECORDINGS_DIR', str(tmp_path / 'recordings'))
+    _find_event_returning(monkeypatch, 'Weekly Planning')
+
+    temp_dir = tmp_path / START_TIMESTAMP
+    temp_dir.mkdir()
+    _write_mono_wav(temp_dir / 'mic.wav', [0.1, 0.2])
+    _write_mono_wav(temp_dir / 'sys.wav', [0.3, 0.4])
+
+    output_path = recorder.merge_and_cleanup(
+        str(temp_dir / 'mic.wav'), str(temp_dir / 'sys.wav'), str(temp_dir),
+    )
+
+    assert os.path.basename(output_path) == f'{START_TIMESTAMP} - Weekly-Planning.wav'
+    with sf.SoundFile(output_path, mode='r') as f:
+        assert f.channels == 2
+        assert len(f) == 2
+
+
+def test_merge_and_cleanup_has_the_audio_on_disk_before_the_calendar_lookup(tmp_path, monkeypatch):
+    recordings_dir = tmp_path / 'recordings'
+    monkeypatch.setenv('RECORDINGS_DIR', str(recordings_dir))
+
+    seen = {}
+
+    def find_event(anchor, config):
+        untitled = recordings_dir / f'{START_TIMESTAMP}.wav'
+        with sf.SoundFile(str(untitled), mode='r') as f:
+            seen['frames'] = len(f)
+            seen['channels'] = f.channels
+        return SimpleNamespace(title='Weekly Planning')
+
+    monkeypatch.setattr(recorder.calendar, 'find_event', find_event)
+
+    temp_dir = tmp_path / START_TIMESTAMP
+    temp_dir.mkdir()
+    _write_mono_wav(temp_dir / 'mic.wav', [0.1, 0.2])
+    _write_mono_wav(temp_dir / 'sys.wav', [0.3, 0.4])
+
+    output_path = recorder.merge_and_cleanup(
+        str(temp_dir / 'mic.wav'), str(temp_dir / 'sys.wav'), str(temp_dir),
+    )
+
+    # The complete merged recording was readable at the untitled path when find_event ran.
+    assert seen == {'frames': 2, 'channels': 2}
+    assert os.path.basename(output_path) == f'{START_TIMESTAMP} - Weekly-Planning.wav'
 
 
 def test_merge_to_stereo_preserves_source_sample_rate_for_pre_migration_orphans(tmp_path):

@@ -40,6 +40,18 @@ def test_resolve_timestamp_parses_matching_filename(tmp_path):
     assert timestamp == datetime.strptime(stem, FILENAME_TIMESTAMP_FORMAT)
 
 
+def test_resolve_timestamp_parses_titled_filename_prefix(tmp_path):
+    stem = '2024-03-15_10-30-00'
+    wav_path = tmp_path / f'{stem} - Weekly-Planning.wav'
+    wav_path.write_bytes(b'')
+
+    timestamp = transcriber._resolve_timestamp(str(wav_path))
+
+    assert timestamp == datetime.strptime(stem, FILENAME_TIMESTAMP_FORMAT)
+    # Explicitly not the mtime fallback, which is what the whole-stem parse used to give here.
+    assert timestamp != datetime.fromtimestamp(os.path.getmtime(str(wav_path)))
+
+
 def test_resolve_timestamp_falls_back_to_mtime(tmp_path):
     wav_path = tmp_path / 'not-a-timestamp.wav'
     wav_path.write_bytes(b'')
