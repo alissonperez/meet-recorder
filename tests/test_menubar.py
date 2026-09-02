@@ -843,6 +843,42 @@ def test_on_silence_recovered_marshals_to_main_thread(app, monkeypatch):
     call_after.assert_called_once_with(app._handle_silence_recovered, 'mic')
 
 
+def test_sys_capture_interrupted_hook_notifies(app):
+    app.on_sys_capture_interrupted('connection interruption')
+
+    app._notify.assert_called_once()
+    subtitle, message = app._notify.call_args.args
+    assert 'interrupted' in subtitle.lower()
+
+
+def test_sys_capture_restored_hook_notifies(app):
+    app.on_sys_capture_restored()
+
+    app._notify.assert_called_once()
+    subtitle, message = app._notify.call_args.args
+    assert 'restored' in subtitle.lower()
+
+
+def test_on_sys_capture_interrupted_marshals_to_main_thread(app, monkeypatch):
+    call_after = MagicMock()
+    monkeypatch.setattr(menubar_module.AppHelper, 'callAfter', call_after)
+
+    app.on_sys_capture_interrupted('connection interruption')
+
+    app._notify.assert_not_called()
+    call_after.assert_called_once_with(app._handle_sys_capture_interrupted, 'connection interruption')
+
+
+def test_on_sys_capture_restored_marshals_to_main_thread(app, monkeypatch):
+    call_after = MagicMock()
+    monkeypatch.setattr(menubar_module.AppHelper, 'callAfter', call_after)
+
+    app.on_sys_capture_restored()
+
+    app._notify.assert_not_called()
+    call_after.assert_called_once_with(app._handle_sys_capture_restored)
+
+
 # --- Switch microphone from the menu bar --------------------------------------
 
 def test_switch_mic_item_enablement_follows_recording_state(app):

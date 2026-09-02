@@ -231,3 +231,33 @@ def test_stream_did_stop_with_no_error_is_a_noop(sck_mocks):
 
     assert handle.stopped_unexpectedly is None
     assert handle._active is True
+
+
+def test_handle_replaced_by_a_restart_keeps_its_own_stopped_unexpectedly_value(sck_mocks):
+    '''A restart calls start() again, creating a second handle/delegate/stream independent of
+    the first - the dead handle it replaces must keep reporting its own stop reason rather than
+    somehow reflecting the new stream's state.'''
+    old_handle = sck_capture.start(lambda chunk: None, sample_rate=16000)
+    old_delegate = sck_mocks['stream'].addStreamOutput_type_sampleHandlerQueue_error_.call_args[0][0]
+    old_delegate.stream_didStopWithError_(sck_mocks['stream'], 'connection interruption')
+
+    new_stream = MagicMock()
+    new_stream.addStreamOutput_type_sampleHandlerQueue_error_.return_value = (True, None)
+    new_stream.startCaptureWithCompletionHandler_.side_effect = lambda completion: completion(None)
+    sck_capture.SCStream.alloc.return_value.initWithFilter_configuration_delegate_.return_value = new_stream
+
+    new_handle = sck_capture.start(lambda chunk: None, sample_rate=16000)
+
+    assert old_handle.stopped_unexpectedly == 'connection interruption'
+    assert new_handle.stopped_unexpectedly is None
+    assert old_handle is not new_handle
+
+
+def test_stop_on_a_handle_replaced_by_a_restart_remains_a_noop(sck_mocks):
+    old_handle = sck_capture.start(lambda chunk: None, sample_rate=16000)
+    old_delegate = sck_mocks['stream'].addStreamOutput_type_sampleHandlerQueue_error_.call_args[0][0]
+    old_delegate.stream_didStopWithError_(sck_mocks['stream'], 'connection interruption')
+
+    sck_capture.stop(old_handle)
+
+    sck_mocks['stream'].stopCaptureWithCompletionHandler_.assert_not_called()
