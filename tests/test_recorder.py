@@ -224,6 +224,11 @@ def test_merge_to_stereo_preserves_source_sample_rate_for_pre_migration_orphans(
         assert f.channels == 2
 
 
+def test_sys_capture_hooks_default_to_callable_noops():
+    recorder.on_sys_capture_interrupted('some error')
+    recorder.on_sys_capture_restored()
+
+
 def test_check_early_sys_buffers_warns_when_no_chunk_received(monkeypatch):
     recorder._state['first_sys_chunk_received'] = threading.Event()
     warning_hook = MagicMock()
@@ -443,7 +448,7 @@ def test_stop_recording_warns_when_sys_handle_stopped_unexpectedly(tmp_path, mon
         path = recorder.stop_recording_and_save()
 
     assert path in caplog.text
-    assert 'connection interruption' in caplog.text
+    assert 'stopped unexpectedly' in caplog.text
 
 
 def test_stop_recording_does_not_warn_on_normal_stop(tmp_path, monkeypatch, caplog):
@@ -554,7 +559,7 @@ def test_early_sck_stop_preserves_full_mic_tail_and_still_warns(tmp_path, monkey
 
     with sf.SoundFile(path, mode='r') as f:
         assert len(f) >= SAMPLE_RATE
-    assert 'connection interruption' in caplog.text
+    assert 'stopped unexpectedly' in caplog.text
 
 
 # --- Two-channel silence monitoring ------------------------------------------
@@ -851,6 +856,205 @@ def test_resume_mic_failure_falls_back_without_stopping_recording(tmp_path, monk
     fallback_stream.start.assert_called_once()
 
     recorder.stop_recording_and_save()
+
+
+def test_interruption_warning_distinguishes_recovered_from_exhausted():
+    recovered_warning = recorder._build_interruption_warning(
+        'out.wav', [{'error': 'connection interruption', 'recovered': True}],
+    )
+    exhausted_warning = recorder._build_interruption_warning(
+        'out.wav', [{'error': 'connection interruption', 'recovered': False}],
+    )
+
+    assert recovered_warning != exhausted_warning
+    assert 'truncated' not in recovered_warning
+    assert 'truncated' not in exhausted_warning
+
+
+def test_interruption_warning_reports_multiple_interruptions():
+    warning = recorder._build_interruption_warning(
+        'out.wav',
+        [
+            {'error': 'first', 'recovered': True},
+            {'error': 'second', 'recovered': True},
+        ],
+    )
+
+    assert '2 time' in warning
+
+
+# --- System-audio restart supervisor -----------------------------------------
+
+def test_restart_supervisor_recovers_into_same_recording(tmp_path, monkeypatch):
+    _mic_stream, fake_handle = _start_recording_with_stubs(tmp_path, monkeypatch)
+    recorder._stop_restart_supervisor()
+
+    fake_handle.stopped_unexpectedly = 'connection interruption'
+    new_handle = MagicMock()
+    new_handle.stopped_unexpectedly = None
+    sck_start = MagicMock(return_value=new_handle)
+    monkeypatch.setattr(recorder.sck_capture, 'start', sck_start)
+
+    now = 1000.0
+    recorder._sys_restart_tick(now)
+    sck_start.assert_not_called()
+    assert recorder._state['sys_handle'] is fake_handle
+
+    now += recorder.SYS_RESTART_BASE_DELAY_SECONDS
+    recorder._sys_restart_tick(now)
+
+    sck_start.assert_called_once()
+    args, kwargs = sck_start.call_args
+    assert args[0] is recorder._state['sys_on_chunk']
+    assert kwargs['sample_rate'] == recorder.SAMPLE_RATE
+    assert kwargs['channels'] == recorder.SYS_AUDIO_CHANNELS
+    assert recorder._state['sys_handle'] is new_handle
+    assert recorder._state['sys_restart']['interruptions'] == [
+        {'error': 'connection interruption', 'recovered': True},
+    ]
+
+    recorder.stop_recording_and_save()
+
+
+def test_restart_supervisor_backs_off_and_bounds_attempts(tmp_path, monkeypatch):
+    _mic_stream, fake_handle = _start_recording_with_stubs(tmp_path, monkeypatch)
+    recorder._stop_restart_supervisor()
+
+    fake_handle.stopped_unexpectedly = 'connection interruption'
+    sck_start = MagicMock(side_effect=RuntimeError('still failing'))
+    monkeypatch.setattr(recorder.sck_capture, 'start', sck_start)
+
+    now = 0.0
+    recorder._sys_restart_tick(now)  # detects the interruption, schedules the first attempt
+
+    delay = recorder.SYS_RESTART_BASE_DELAY_SECONDS
+    delays_used = []
+    for _ in range(recorder.SYS_RESTART_MAX_ATTEMPTS):
+        now += delay
+        delays_used.append(delay)
+        recorder._sys_restart_tick(now)
+        delay *= 2
+
+    assert sck_start.call_count == recorder.SYS_RESTART_MAX_ATTEMPTS
+    assert all(b > a for a, b in zip(delays_used, delays_used[1:]))
+
+    now += delay
+    recorder._sys_restart_tick(now)
+    assert sck_start.call_count == recorder.SYS_RESTART_MAX_ATTEMPTS  # budget exhausted, no further attempt
+
+    recorder.stop_recording_and_save()
+
+
+def test_restart_budget_resets_after_sustained_healthy_capture(tmp_path, monkeypatch):
+    _mic_stream, fake_handle = _start_recording_with_stubs(tmp_path, monkeypatch)
+    recorder._stop_restart_supervisor()
+
+    fake_handle.stopped_unexpectedly = 'first interruption'
+    new_handle = MagicMock()
+    new_handle.stopped_unexpectedly = None
+    monkeypatch.setattr(recorder.sck_capture, 'start', MagicMock(return_value=new_handle))
+
+    now = 0.0
+    recorder._sys_restart_tick(now)
+    now += recorder.SYS_RESTART_BASE_DELAY_SECONDS
+    recorder._sys_restart_tick(now)  # restart succeeds
+
+    assert recorder._state['sys_restart']['attempts_left'] == recorder.SYS_RESTART_MAX_ATTEMPTS - 1
+
+    now += recorder.SYS_RESTART_HEALTHY_RESET_SECONDS
+    recorder._state['last_chunk_at']['sys'] = now
+    recorder._sys_restart_tick(now)
+
+    assert recorder._state['sys_restart']['attempts_left'] == recorder.SYS_RESTART_MAX_ATTEMPTS
+
+    # A later, unrelated interruption is retried with the fully-restored budget.
+    new_handle.stopped_unexpectedly = 'second, unrelated interruption'
+    recorder._sys_restart_tick(now)
+    assert recorder._state['sys_restart']['attempts_left'] == recorder.SYS_RESTART_MAX_ATTEMPTS
+
+    recorder.stop_recording_and_save()
+
+
+def test_restart_short_lived_restart_does_not_reset_budget(tmp_path, monkeypatch):
+    _mic_stream, fake_handle = _start_recording_with_stubs(tmp_path, monkeypatch)
+    recorder._stop_restart_supervisor()
+
+    fake_handle.stopped_unexpectedly = 'first interruption'
+    new_handle = MagicMock()
+    new_handle.stopped_unexpectedly = None
+    monkeypatch.setattr(recorder.sck_capture, 'start', MagicMock(return_value=new_handle))
+
+    now = 0.0
+    recorder._sys_restart_tick(now)
+    now += recorder.SYS_RESTART_BASE_DELAY_SECONDS
+    recorder._sys_restart_tick(now)  # restart succeeds
+
+    attempts_after_restart = recorder._state['sys_restart']['attempts_left']
+    assert attempts_after_restart == recorder.SYS_RESTART_MAX_ATTEMPTS - 1
+
+    # The restarted stream dies again well before the sustained healthy period elapses.
+    new_handle.stopped_unexpectedly = 'second interruption (short-lived)'
+    now += 1.0
+    recorder._sys_restart_tick(now)
+
+    assert recorder._state['sys_restart']['attempts_left'] == attempts_after_restart
+
+    recorder.stop_recording_and_save()
+
+
+def test_no_restart_attempted_after_user_requested_stop(tmp_path, monkeypatch):
+    _mic_stream, fake_handle = _start_recording_with_stubs(tmp_path, monkeypatch)
+    recorder._stop_restart_supervisor()
+
+    sck_start = MagicMock()
+    monkeypatch.setattr(recorder.sck_capture, 'start', sck_start)
+
+    fake_handle.stopped_unexpectedly = None
+    recorder.stop_recording_and_save()
+
+    sck_start.assert_not_called()
+
+
+def test_restart_completing_after_teardown_stops_stream_and_leaves_sys_handle_none(tmp_path, monkeypatch):
+    '''A restart attempt can still be blocked inside sck_capture.start() when
+    _stop_restart_supervisor()'s bounded join times out, so the user's stop can complete
+    (clearing _state['sys_restart']/'sys_restart_lock' to None) before this in-flight tick
+    reaches its publish guard. Uses real threads to reproduce that interleaving, rather than
+    synthetic `now` values, since it is genuinely concurrent.'''
+    _mic_stream, fake_handle = _start_recording_with_stubs(tmp_path, monkeypatch)
+    recorder._stop_restart_supervisor()
+
+    fake_handle.stopped_unexpectedly = 'connection interruption'
+    recorder._sys_restart_tick(0.0)  # observe the interruption and schedule the first attempt
+
+    new_handle = MagicMock()
+    new_handle.stopped_unexpectedly = None
+    sck_stop = MagicMock()
+    teardown_started = threading.Event()
+    release_start = threading.Event()
+
+    def blocking_start(*args, **kwargs):
+        teardown_started.set()
+        release_start.wait(timeout=2)
+        return new_handle
+
+    monkeypatch.setattr(recorder.sck_capture, 'start', MagicMock(side_effect=blocking_start))
+    monkeypatch.setattr(recorder.sck_capture, 'stop', sck_stop)
+
+    tick_thread = threading.Thread(
+        target=recorder._sys_restart_tick, args=(recorder.SYS_RESTART_BASE_DELAY_SECONDS,),
+    )
+    tick_thread.start()
+
+    assert teardown_started.wait(timeout=2)
+    recorder.stop_recording_and_save()
+    assert recorder._state['sys_handle'] is None
+
+    release_start.set()
+    tick_thread.join(timeout=2)
+
+    sck_stop.assert_any_call(new_handle)
+    assert recorder._state['sys_handle'] is None
 
 
 def test_discard_recording_removes_temp_dir_without_writing_output(tmp_path, monkeypatch):

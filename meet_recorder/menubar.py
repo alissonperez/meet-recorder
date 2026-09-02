@@ -70,6 +70,8 @@ class MenubarApp(rumps.App):
 
         recorder.on_silence_warning = self.on_silence_warning
         recorder.on_silence_recovered = self.on_silence_recovered
+        recorder.on_sys_capture_interrupted = self.on_sys_capture_interrupted
+        recorder.on_sys_capture_restored = self.on_sys_capture_restored
 
         self._recovery_timer = rumps.Timer(self._run_recovery_scan, RECOVERY_SCAN_DELAY_SECONDS)
 
@@ -630,6 +632,23 @@ class MenubarApp(rumps.App):
     def _handle_silence_recovered(self, channel):
         if channel == 'mic':
             self._clear_mic_attention_reason('silence')
+
+    def on_sys_capture_interrupted(self, error):
+        # Called from the recorder's restart-supervisor thread; marshal to the main thread
+        # like on_silence_warning, since _notify touches AppKit.
+        AppHelper.callAfter(self._handle_sys_capture_interrupted, error)
+
+    def _handle_sys_capture_interrupted(self, error):
+        self._notify(
+            'System audio interrupted',
+            'System audio capture stopped; attempting to reconnect…',
+        )
+
+    def on_sys_capture_restored(self):
+        AppHelper.callAfter(self._handle_sys_capture_restored)
+
+    def _handle_sys_capture_restored(self):
+        self._notify('System audio restored', 'System audio capture reconnected.')
 
     def _show_mic_selection_dialog(self, devices):
         if not devices:
