@@ -537,6 +537,175 @@ def test_on_start_success_enables_stop_items(app, monkeypatch):
     assert app.discard_item.callback == app.on_discard
 
 
+def test_pause_resume_changes_title_and_keeps_paused_finalizers_enabled(app, monkeypatch):
+    app._set_recording_state(True)
+    pause = MagicMock(return_value=True)
+    monkeypatch.setattr(menubar_module.recorder, 'pause_recording', pause)
+
+    app.on_pause_resume(None)
+
+    pause.assert_called_once()
+    assert app.is_recording is True
+    assert app.is_paused is True
+    assert app.pause_item.title == 'Retomar'
+    assert app.pause_item.callback == app.on_pause_resume
+    assert app.stop_item.callback == app.on_stop
+    assert app.stop_no_transcribe_item.callback == app.on_stop_no_transcribe
+    assert app.discard_item.callback == app.on_discard
+    assert app.switch_mic_item.callback is None
+
+    resume = MagicMock(return_value=None)
+    monkeypatch.setattr(menubar_module.recorder, 'resume_recording', resume)
+    app.on_pause_resume(None)
+
+    resume.assert_called_once()
+    assert app.is_paused is False
+    assert app.pause_item.title == 'Pausar'
+    assert app.switch_mic_item.callback == app.on_switch_mic
+
+
+def test_pause_transition_failure_restores_active_controls(app, monkeypatch):
+    app._set_recording_state(True)
+    monkeypatch.setattr(
+        menubar_module.recorder, 'pause_recording', MagicMock(side_effect=RuntimeError('stop failed')),
+    )
+
+    app.on_pause_resume(None)
+
+    assert app.is_recording is True
+    assert app.is_paused is False
+    assert app.pause_item.callback == app.on_pause_resume
+    assert app.stop_item.callback == app.on_stop
+    app._show_alert.assert_called_once()
+    assert 'stop failed' in app._show_alert.call_args.kwargs['message']
+
+
+def test_transition_in_flight_disables_every_lifecycle_action(app):
+    app._set_recording_state(True)
+    app._recording_transition_in_progress = True
+    app._refresh_recording_actions()
+
+    assert app.pause_item.callback is None
+    assert app.stop_item.callback is None
+    assert app.stop_no_transcribe_item.callback is None
+    assert app.discard_item.callback is None
+    assert app.switch_mic_item.callback is None
+    assert app.quit_item.callback is None
+
+
+def test_pause_action_disabled_during_mic_switch(app):
+    app._set_recording_state(True)
+    app._mic_switch_in_progress = True
+    app._refresh_recording_actions()
+
+    assert app.pause_item.callback is None
+    assert app.switch_mic_item.callback is None
+
+
+def test_resume_microphone_fallback_publishes_active_state_and_alerts(app, monkeypatch):
+    app._set_recording_state(True, paused=True)
+    fallback = menubar_module.recorder.RecordingResumeFallbackError(0, 4, RuntimeError('gone'))
+    monkeypatch.setattr(menubar_module.recorder, 'resume_recording', MagicMock(return_value=fallback))
+
+    app.on_pause_resume(None)
+
+    assert app.is_recording is True
+    assert app.is_paused is False
+    assert app.pause_item.title == 'Pausar'
+    app._show_alert.assert_called_once()
+    assert 'default device 4' in app._show_alert.call_args.kwargs['message']
+
+
+def test_stale_transition_completion_is_ignored(app):
+    app._set_recording_state(True)
+    stale_generation = app._recording_transition_generation
+    app._recording_transition_generation += 1
+    app._recording_transition_in_progress = True
+
+    app._on_recording_transition_success(stale_generation, True, None)
+
+    assert app.is_paused is False
+    assert app._recording_transition_in_progress is True
+
+    app._on_recording_transition_failure(stale_generation, False, RuntimeError('boom'))
+
+    assert app._recording_transition_in_progress is True
+    app._show_alert.assert_not_called()
+
+
+def test_quit_saves_a_paused_recording(app, monkeypatch):
+    app._set_recording_state(True, paused=True)
+    stop_and_save = MagicMock(return_value='/tmp/out.wav')
+    monkeypatch.setattr(menubar_module.recorder, 'stop_recording_and_save', stop_and_save)
+    monkeypatch.setattr(menubar_module.rumps, 'quit_application', MagicMock())
+
+    app.on_quit(None)
+
+    stop_and_save.assert_called_once()
+    assert app.is_recording is False
+    assert app.is_paused is False
+
+
+def test_paused_finalizers_reset_ui(app, monkeypatch):
+    monkeypatch.setattr(menubar_module.recorder, 'stop_recording_and_save', MagicMock(return_value='/tmp/o.wav'))
+    monkeypatch.setattr(menubar_module.transcriber, 'transcribe', lambda path: None)
+    monkeypatch.setattr(menubar_module.asyncio, 'run', MagicMock())
+
+    app._set_recording_state(True, paused=True)
+    app.on_stop_no_transcribe(None)
+
+    assert app.is_recording is False
+    assert app.is_paused is False
+    assert app.pause_item.callback is None
+    assert app.start_item.callback == app.on_start
+
+    app._set_recording_state(True, paused=True)
+    app._show_alert.return_value = 1
+    monkeypatch.setattr(menubar_module.recorder, 'discard_recording', MagicMock())
+    app.on_discard(None)
+
+    assert app.is_recording is False
+    assert app.is_paused is False
+    assert app.start_item.callback == app.on_start
+
+
+def test_late_mic_switch_completion_cannot_replace_idle_state(app):
+    app._set_recording_state(False)
+
+    app._on_mic_switch_success()
+
+    assert app.is_recording is False
+    assert app.switch_mic_item.callback is None
+    assert app.start_item.callback == app.on_start
+
+    app._on_mic_switch_terminal_failure(RuntimeError('device gone'))
+
+    assert app.is_recording is False
+    assert app.switch_mic_item.callback is None
+    app._show_alert.assert_not_called()
+
+
+def test_late_mic_switch_completion_cannot_reopen_capture_while_paused(app):
+    app._set_recording_state(True, paused=True)
+    app._mic_switch_in_progress = True
+
+    app._on_mic_switch_success()
+
+    assert app.is_paused is True
+    assert app._mic_switch_in_progress is True
+    assert app.switch_mic_item.callback is None
+
+
+def test_paused_icon_states_are_distinct_and_use_existing_size(app):
+    app._set_recording_state(True, paused=True)
+    assert app._current_state_name() == 'paused'
+    assert app._icons['paused'].size() == menubar_module.ICON_SIZE_PT
+
+    app._begin_transcription()
+    assert app._current_state_name() == 'paused_transcribing'
+    assert app._icons['paused_transcribing'].size() == menubar_module.ICON_SIZE_PT
+
+
 def test_on_discard_cancel_leaves_recording_running(app, monkeypatch):
     app._set_recording_state(True)
     app._show_alert.return_value = 0

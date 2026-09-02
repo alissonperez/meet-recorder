@@ -19,7 +19,9 @@ ASSET_DIR = os.path.join(os.path.dirname(__file__), 'assets')
 # state so switching between them never resizes the NSStatusItem and shifts neighboring
 # menu-bar icons ("falling").
 ICON_SIZE_PT = (23.75, 28.75)
-ICON_STATES = ('idle', 'recording', 'transcribing', 'recording_transcribing')
+ICON_STATES = (
+    'idle', 'recording', 'paused', 'transcribing', 'recording_transcribing', 'paused_transcribing',
+)
 
 RECOVERY_SCAN_DELAY_SECONDS = 1
 AUTORECORD_FAILURE_NOTIFY_THRESHOLD = 3
@@ -40,6 +42,7 @@ class MenubarApp(rumps.App):
         super().__init__('MeetRecorder', quit_button=None)
 
         self.is_recording = False
+        self.is_paused = False
         self.active_transcriptions = 0
         self._transcriptions_lock = threading.Lock()
         # Paths whose transcription is running right now, so a retry scan can't start
@@ -47,6 +50,8 @@ class MenubarApp(rumps.App):
         self._inflight_transcriptions = set()
         self._inflight_lock = threading.Lock()
         self._start_in_progress = False
+        self._recording_transition_in_progress = False
+        self._recording_transition_generation = 0
 
         self._mic_attention_reasons = set()
         self._blink_phase = False
@@ -57,6 +62,7 @@ class MenubarApp(rumps.App):
         self._refresh_icon()
 
         self.start_item = rumps.MenuItem('Iniciar', callback=self.on_start)
+        self.pause_item = rumps.MenuItem('Pausar', callback=None)
         self.stop_item = rumps.MenuItem('Parar', callback=None)
         self.stop_no_transcribe_item = rumps.MenuItem('Parar e não transcrever', callback=None)
         self.discard_item = rumps.MenuItem('Descartar', callback=None)
@@ -64,7 +70,7 @@ class MenubarApp(rumps.App):
         self.quit_item = rumps.MenuItem('Sair', callback=self.on_quit)
 
         self.menu = [
-            self.start_item, self.stop_item, self.stop_no_transcribe_item, self.discard_item,
+            self.start_item, self.pause_item, self.stop_item, self.stop_no_transcribe_item, self.discard_item,
             self.switch_mic_item, self.quit_item,
         ]
 
@@ -404,7 +410,11 @@ class MenubarApp(rumps.App):
         self._refresh_icon()
 
     def _current_state_name(self):
-        if self.is_recording and self.active_transcriptions > 0:
+        if self.is_paused and self.active_transcriptions > 0:
+            base = 'paused_transcribing'
+        elif self.is_paused:
+            base = 'paused'
+        elif self.is_recording and self.active_transcriptions > 0:
             base = 'recording_transcribing'
         elif self.is_recording:
             base = 'recording'
@@ -413,7 +423,7 @@ class MenubarApp(rumps.App):
         else:
             base = 'idle'
 
-        if self._mic_attention_reasons and self._blink_phase:
+        if self.is_recording and not self.is_paused and self._mic_attention_reasons and self._blink_phase:
             return 'idle'
         return base
 
@@ -446,20 +456,34 @@ class MenubarApp(rumps.App):
         if nsapp is not None:
             nsapp.setStatusBarIcon()
 
-    def _set_recording_state(self, recording):
+    def _set_recording_state(self, recording, paused=False):
         self.is_recording = recording
-        self._refresh_icon()
-        self.start_item.set_callback(None if recording else self.on_start)
-        self.stop_item.set_callback(self.on_stop if recording else None)
-        self.stop_no_transcribe_item.set_callback(self.on_stop_no_transcribe if recording else None)
-        self.discard_item.set_callback(self.on_discard if recording else None)
-        self.switch_mic_item.set_callback(self.on_switch_mic if recording else None)
+        self.is_paused = recording and paused
         if not recording:
             self._mic_switch_in_progress = False
             if self._mic_attention_reasons:
                 self._mic_attention_reasons.clear()
                 self._blink_timer.stop()
             self._blink_phase = False
+        self._refresh_recording_actions()
+        self._refresh_icon()
+
+    def _refresh_recording_actions(self):
+        recording = self.is_recording
+        transition = self._recording_transition_in_progress
+        stable = recording and not transition
+        self.start_item.set_callback(None if recording or self._start_in_progress else self.on_start)
+        self.pause_item.title = 'Retomar' if self.is_paused else 'Pausar'
+        self.pause_item.set_callback(
+            self.on_pause_resume if stable and not self._mic_switch_in_progress else None
+        )
+        self.stop_item.set_callback(self.on_stop if stable else None)
+        self.stop_no_transcribe_item.set_callback(self.on_stop_no_transcribe if stable else None)
+        self.discard_item.set_callback(self.on_discard if stable else None)
+        self.switch_mic_item.set_callback(
+            self.on_switch_mic if stable and not self.is_paused and not self._mic_switch_in_progress else None
+        )
+        self.quit_item.set_callback(None if transition else self.on_quit)
 
     def _start_recording_async(self, on_failure=None):
         # recorder.start_recording() can block for a long time (or hang) on a stale
@@ -490,13 +514,58 @@ class MenubarApp(rumps.App):
 
     def _on_start_failure(self, error, alert_title='Failed to start recording'):
         self._start_in_progress = False
-        self.start_item.set_callback(self.on_start)
+        self._refresh_recording_actions()
         rumps.alert(title=alert_title, message=str(error))
 
     def on_start(self, _):
         self._start_recording_async()
 
+    def on_pause_resume(self, _):
+        if (
+            not self.is_recording
+            or self._recording_transition_in_progress
+            or self._mic_switch_in_progress
+        ):
+            return
+
+        was_paused = self.is_paused
+        self._recording_transition_in_progress = True
+        self._recording_transition_generation += 1
+        generation = self._recording_transition_generation
+        self._refresh_recording_actions()
+
+        def worker():
+            try:
+                if was_paused:
+                    fallback = recorder.resume_recording()
+                else:
+                    recorder.pause_recording()
+                    fallback = None
+            except Exception as error:
+                AppHelper.callAfter(self._on_recording_transition_failure, generation, was_paused, error)
+            else:
+                AppHelper.callAfter(self._on_recording_transition_success, generation, not was_paused, fallback)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_recording_transition_success(self, generation, paused, fallback):
+        if generation != self._recording_transition_generation or not self.is_recording:
+            return
+        self._recording_transition_in_progress = False
+        self._set_recording_state(True, paused=paused)
+        if fallback is not None:
+            self._show_alert_on_main(title='Microfone substituído', message=str(fallback))
+
+    def _on_recording_transition_failure(self, generation, was_paused, error):
+        if generation != self._recording_transition_generation or not self.is_recording:
+            return
+        self._recording_transition_in_progress = False
+        self._set_recording_state(True, paused=was_paused)
+        self._show_alert_on_main(title='Falha ao pausar gravação' if not was_paused else 'Falha ao retomar gravação', message=str(error))
+
     def on_stop(self, _):
+        if not self.is_recording or self._recording_transition_in_progress:
+            return
         path = recorder.stop_recording_and_save()
         logger.info(f'Recording saved to {path}')
 
@@ -506,12 +575,19 @@ class MenubarApp(rumps.App):
         thread.start()
 
     def on_stop_no_transcribe(self, _):
+        if not self.is_recording or self._recording_transition_in_progress:
+            return
         path = recorder.stop_recording_and_save()
         logger.info(f'Recording saved to {path} (transcription skipped)')
 
         self._set_recording_state(False)
 
     def on_discard(self, _):
+        # The disabled menu item prevents this in normal use. Keep the confirmation path
+        # reachable for the existing idle/start-in-flight UI behavior; only a whole-recording
+        # transition must block it because that session is actively changing underneath us.
+        if self._recording_transition_in_progress:
+            return
         response = self._show_alert(
             title='Descartar gravação?', message='', ok='Descartar', cancel='Cancelar',
         )
@@ -685,8 +761,10 @@ class MenubarApp(rumps.App):
         thread.start()
 
     def _on_mic_switch_success(self):
+        if not self.is_recording or self.is_paused:
+            return
         self._mic_switch_in_progress = False
-        self.switch_mic_item.set_callback(self.on_switch_mic if self.is_recording else None)
+        self._refresh_recording_actions()
         self._clear_mic_attention_reason('paused')
 
     def _on_mic_switch_fallback(self, error):
@@ -695,8 +773,10 @@ class MenubarApp(rumps.App):
 
     def _on_mic_switch_terminal_failure(self, error):
         logger.error(f'Failed to resume microphone: {error}')
+        if not self.is_recording or self.is_paused:
+            return
         self._mic_switch_in_progress = False
-        self.switch_mic_item.set_callback(self.on_switch_mic if self.is_recording else None)
+        self._refresh_recording_actions()
         self._clear_mic_attention_reason('paused')
         self._show_alert_on_main(title='Microfone indisponível', message=str(error))
 
@@ -708,11 +788,11 @@ class MenubarApp(rumps.App):
         self._show_alert_on_main(title='Falha ao trocar microfone', message=str(error))
 
     def on_switch_mic(self, _):
-        if self._mic_switch_in_progress:
+        if self._mic_switch_in_progress or not self.is_recording or self.is_paused or self._recording_transition_in_progress:
             return
 
         self._mic_switch_in_progress = True
-        self.switch_mic_item.set_callback(None)
+        self._refresh_recording_actions()
         self._add_mic_attention_reason('paused')
 
         def worker():
@@ -728,9 +808,11 @@ class MenubarApp(rumps.App):
         thread.start()
 
     def on_quit(self, _):
+        if self._recording_transition_in_progress:
+            return
         if self.is_recording:
             recorder.stop_recording_and_save()
-            self.is_recording = False
+            self._set_recording_state(False)
 
         if self.active_transcriptions > 0:
             response = rumps.alert(
