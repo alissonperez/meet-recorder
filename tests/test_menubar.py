@@ -648,6 +648,31 @@ def test_scan_retries_a_due_entry_and_marks_it_done(app, retry, monkeypatch):
     retry.mark_done.assert_called_once_with(retry.wav, app.config)
 
 
+def test_scan_marks_done_under_the_path_it_retried_even_if_the_run_renames_it(
+    app, retry, monkeypatch, tmp_path,
+):
+    # A successful run renames the recording to carry its title, but the ledger entry was
+    # created under the pre-rename path - marking done under the new one would strand the
+    # original entry and retry it until its budget ran out.
+    original = tmp_path / '2024-03-15_10-00-00.wav'
+    original.write_bytes(b'recorded-audio')
+    renamed = tmp_path / '2024-03-15_10-00-00 - Weekly-Planning.wav'
+
+    def transcribe_and_rename(_coro):
+        original.rename(renamed)
+
+    monkeypatch.setattr(menubar_module.asyncio, 'run', transcribe_and_rename)
+    retry.due_paths.return_value = [str(original)]
+    started = _capture_threads(monkeypatch)
+
+    app._run_transcription_retry_scan(sender=MagicMock())
+    started[0]()
+
+    retry.mark_done.assert_called_once_with(str(original), app.config)
+    retry.defer.assert_not_called()
+    assert renamed.exists()
+
+
 def test_scan_starts_at_most_the_per_scan_limit(app, retry, monkeypatch):
     limit = menubar_module.MAX_TRANSCRIPTION_RETRIES_PER_SCAN
     retry.due_paths.return_value = [f'/tmp/rec-{i}.wav' for i in range(limit + 2)]

@@ -158,6 +158,32 @@ It uses the same capture logic as `python main.py record` (requires the
 The app runs attached to the terminal it was launched from (no `.app` bundle / Finder launch yet)
 and must be started manually each time — it does not launch at login.
 
+## Recording files
+
+Recordings are saved as stereo `.wav` files in `RECORDINGS_DIR` (default `~/MeetRecordings`, see
+`.env.example`), named after the moment the recording *started*, not when it was stopped:
+
+```
+2026-07-09_14-30-00.wav
+2026-07-09_14-30-00 - Weekly-Planning.wav
+```
+
+A recording is always *saved* under the plain timestamp name — the stop path makes no network call.
+Once [transcription](#transcription) finishes successfully, the recording is renamed to carry the
+same title its transcript and summary carry: the meeting title slugified with the same rules and
+80-character cap, after a ` - ` separator. The `.wav` keeps its own timestamp format, so it does not
+match the Markdown filenames character for character, but both name the same meeting.
+
+The title is whichever one the transcription actually used — the calendar event's when one matched,
+otherwise the LLM-generated one — so the audio and its transcript never disagree. A recording that
+never completes a transcription keeps its bare timestamp: that includes **Parar sem transcrever**
+and a transcription abandoned after exhausting its retries.
+
+The rename is the last step and only ever runs after both output files are written, so nothing it
+can do puts a recording or a transcript at risk; if it fails, it is logged and the recording keeps
+the name it had. Nothing already on disk is renamed by upgrading, and an untitled recording
+transcribes exactly as before.
+
 ## Transcription
 
 After a recording is stopped (via **Parar** in the menu bar app, or manually via the CLI), it can
@@ -165,9 +191,11 @@ be transcribed into a full-text Markdown transcript plus an LLM-generated Markdo
 pipeline: downmixes/compresses the recording's `.wav` to mono mp3 via `ffmpeg`, splits it into
 chunks if it's longer than the configured chunk duration, transcribes each chunk via an
 OpenAI-compatible `/audio/transcriptions` endpoint, generates a short title and a structured
-summary via separate LLM chat calls, and writes both as Markdown files. The source `.wav` is
-never deleted, moved, or renamed by this process, regardless of success or failure — a failed or
-skipped transcription can always be re-run later.
+summary via separate LLM chat calls, and writes both as Markdown files. The source `.wav` is never
+deleted, moved, or modified by this process, regardless of success or failure — a failed or skipped
+transcription can always be re-run later. Its only effect on the recording is the final rename, once
+both output files are written, that gives it the meeting's title (see
+[Recording files](#recording-files)); a run that fails leaves the filename untouched.
 
 ### Retries
 
@@ -295,10 +323,12 @@ within the winning tier, the closest event by start-time distance across all acc
 
 When an event matches:
 
-- its title drives both the transcript and summary **filenames** and the `title:` frontmatter (and
-  the LLM title call is skipped);
+- its title drives the transcript and summary **filenames**, the recording's own filename (see
+  [Recording files](#recording-files)), and the `title:` frontmatter (and the LLM title call is
+  skipped);
 - the frontmatter also gains `calendar`, `event_start`, `event_end`, and `attendees` fields;
 - the event title + attendee names are prepended to the summary prompt for context.
+
 
 Events you've **declined** are ignored, as are events whose slugified title contains any entry in
 `ignored_event_slugs`:

@@ -1,8 +1,11 @@
 '''Deferred retry (layer 2) for transcriptions that failed their immediate retries.
 
-Keyed by the recording's `.wav` path, which the pipeline never renames. The menu bar
-app is the only caller: it owns the long-running process whose timer fires the scan
-(a CLI run exits before any retry could happen, so it keeps failing terminally).
+Keyed by the recording's `.wav` path as it was when the entry was created. A successful
+run renames the recording to carry its meeting title as its last step, so entries stay
+keyed by the pre-rename path and a succeeding retry must be marked done under that same
+path - the rename happens only on success, where the entry is being cleared anyway. The
+menu bar app is the only caller: it owns the long-running process whose timer fires the
+scan (a CLI run exits before any retry could happen, so it keeps failing terminally).
 '''
 
 import math

@@ -40,6 +40,18 @@ def test_resolve_timestamp_parses_matching_filename(tmp_path):
     assert timestamp == datetime.strptime(stem, FILENAME_TIMESTAMP_FORMAT)
 
 
+def test_resolve_timestamp_parses_titled_filename_prefix(tmp_path):
+    stem = '2024-03-15_10-30-00'
+    wav_path = tmp_path / f'{stem} - Weekly-Planning.wav'
+    wav_path.write_bytes(b'')
+
+    timestamp = transcriber._resolve_timestamp(str(wav_path))
+
+    assert timestamp == datetime.strptime(stem, FILENAME_TIMESTAMP_FORMAT)
+    # Explicitly not the mtime fallback, which is what the whole-stem parse used to give here.
+    assert timestamp != datetime.fromtimestamp(os.path.getmtime(str(wav_path)))
+
+
 def test_resolve_timestamp_falls_back_to_mtime(tmp_path):
     wav_path = tmp_path / 'not-a-timestamp.wav'
     wav_path.write_bytes(b'')
@@ -568,3 +580,176 @@ def test_transcribe_chunk_missing_api_key_never_reaches_the_request(monkeypatch,
         transcriber._transcribe_chunk(str(chunk), _chunk_config())
 
     posted.assert_not_called()
+
+
+# --- Post-success recording rename -------------------------------------------
+
+RENAME_TIMESTAMP = '2024-03-15_10-00-00'
+
+
+def _mock_pipeline(monkeypatch, tmp_path, title='Weekly Planning', event=None):
+    '''Stub every network/ffmpeg step of transcribe() so only its file-level behavior runs.'''
+    work_dir = tmp_path / 'work'
+    work_dir.mkdir(exist_ok=True)
+    monkeypatch.setattr(transcriber, '_preprocess_audio', lambda p: str(work_dir / 'a.mp3'))
+    monkeypatch.setattr(transcriber, '_transcribe_audio', lambda m, c, e=None: 'transcript text')
+    monkeypatch.setattr(transcriber, '_generate_summary', lambda t, c, e=None: 'summary text')
+    monkeypatch.setattr(transcriber, '_generate_title', Mock(return_value=title))
+    monkeypatch.setattr(transcriber.calendar, 'find_event', lambda ts, c: event)
+
+
+def _recording(tmp_path, name=f'{RENAME_TIMESTAMP}.wav'):
+    wav = tmp_path / name
+    wav.write_bytes(b'recorded-audio')
+    return wav
+
+
+def _assert_outputs_intact(result):
+    for key in ('transcript_path', 'summary_path'):
+        assert os.path.isfile(result[key])
+        assert open(result[key]).read()
+
+
+def test_transcribe_renames_the_recording_to_the_run_title(monkeypatch, tmp_path):
+    _mock_pipeline(monkeypatch, tmp_path)
+    wav = _recording(tmp_path)
+
+    result = asyncio.run(transcriber.transcribe(str(wav), config=_transcribe_config(tmp_path)))
+
+    renamed = tmp_path / f'{RENAME_TIMESTAMP} - Weekly-Planning.wav'
+    assert result['recording_path'] == str(renamed)
+    assert renamed.read_bytes() == b'recorded-audio'
+    assert not wav.exists()
+    _assert_outputs_intact(result)
+    # The title slug the recording took is the one the outputs were named with.
+    assert 'Weekly-Planning' in os.path.basename(result['transcript_path'])
+
+
+def test_transcribe_uses_the_event_title_for_the_rename(monkeypatch, tmp_path):
+    _mock_pipeline(monkeypatch, tmp_path, event=_event(title='Real Meeting'))
+    wav = _recording(tmp_path)
+
+    result = asyncio.run(transcriber.transcribe(str(wav), config=_transcribe_config(tmp_path)))
+
+    assert os.path.basename(result['recording_path']) == f'{RENAME_TIMESTAMP} - Real-Meeting.wav'
+    _assert_outputs_intact(result)
+
+
+def test_transcribe_leaves_a_recording_that_already_carries_the_title(monkeypatch, tmp_path):
+    _mock_pipeline(monkeypatch, tmp_path)
+    wav = _recording(tmp_path, name=f'{RENAME_TIMESTAMP} - Weekly-Planning.wav')
+
+    result = asyncio.run(transcriber.transcribe(str(wav), config=_transcribe_config(tmp_path)))
+
+    assert result['recording_path'] == str(wav)
+    assert wav.read_bytes() == b'recorded-audio'
+    _assert_outputs_intact(result)
+
+
+def test_transcribe_keeps_the_name_when_the_title_slugifies_to_nothing(monkeypatch, tmp_path):
+    _mock_pipeline(monkeypatch, tmp_path, title='!!! ???')
+    wav = _recording(tmp_path)
+
+    result = asyncio.run(transcriber.transcribe(str(wav), config=_transcribe_config(tmp_path)))
+
+    assert result['recording_path'] == str(wav)
+    assert wav.read_bytes() == b'recorded-audio'
+    _assert_outputs_intact(result)
+
+
+def test_transcribe_keeps_the_name_without_a_parseable_timestamp_prefix(monkeypatch, tmp_path):
+    _mock_pipeline(monkeypatch, tmp_path)
+    wav = _recording(tmp_path, name='meeting-audio.wav')
+
+    result = asyncio.run(transcriber.transcribe(str(wav), config=_transcribe_config(tmp_path)))
+
+    assert result['recording_path'] == str(wav)
+    assert wav.read_bytes() == b'recorded-audio'
+    _assert_outputs_intact(result)
+
+
+def test_transcribe_does_not_overwrite_an_existing_destination(monkeypatch, tmp_path):
+    _mock_pipeline(monkeypatch, tmp_path)
+    wav = _recording(tmp_path)
+    existing = tmp_path / f'{RENAME_TIMESTAMP} - Weekly-Planning.wav'
+    existing.write_bytes(b'someone-elses-recording')
+
+    result = asyncio.run(transcriber.transcribe(str(wav), config=_transcribe_config(tmp_path)))
+
+    assert result['recording_path'] == str(wav)
+    assert wav.read_bytes() == b'recorded-audio'
+    assert existing.read_bytes() == b'someone-elses-recording'
+    _assert_outputs_intact(result)
+
+
+def test_transcribe_still_succeeds_when_the_rename_fails(monkeypatch, tmp_path):
+    _mock_pipeline(monkeypatch, tmp_path)
+    wav = _recording(tmp_path)
+
+    def boom(src, dst):
+        raise OSError('rename failed')
+
+    monkeypatch.setattr(transcriber.naming.os, 'rename', boom)
+
+    result = asyncio.run(transcriber.transcribe(str(wav), config=_transcribe_config(tmp_path)))
+
+    assert result['recording_path'] == str(wav)
+    assert wav.read_bytes() == b'recorded-audio'
+    _assert_outputs_intact(result)
+
+
+def test_transcribe_does_not_rename_when_the_run_fails(monkeypatch, tmp_path):
+    _mock_pipeline(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        transcriber, '_generate_summary',
+        Mock(side_effect=transcriber.TranscriptionError('summary failed')),
+    )
+    wav = _recording(tmp_path)
+
+    with pytest.raises(transcriber.TranscriptionError):
+        asyncio.run(transcriber.transcribe(str(wav), config=_transcribe_config(tmp_path)))
+
+    assert wav.exists()
+    assert wav.read_bytes() == b'recorded-audio'
+    assert list(tmp_path.glob('*.wav')) == [wav]
+
+
+def test_transcribe_writes_both_outputs_before_renaming(monkeypatch, tmp_path):
+    _mock_pipeline(monkeypatch, tmp_path)
+    wav = _recording(tmp_path)
+    seen = {}
+
+    real_rename = os.rename
+
+    def observing_rename(src, dst):
+        # Both output files must already be complete when the rename runs - the whole point
+        # of doing it last is that nothing it can do puts the run's real work at risk.
+        seen['transcripts'] = sorted(
+            p.name for p in (tmp_path / 'transcripts').rglob('*.md')
+        )
+        seen['summaries'] = sorted(p.name for p in (tmp_path / 'summaries').rglob('*.md'))
+        real_rename(src, dst)
+
+    monkeypatch.setattr(transcriber.naming.os, 'rename', observing_rename)
+
+    result = asyncio.run(transcriber.transcribe(str(wav), config=_transcribe_config(tmp_path)))
+
+    assert len(seen['transcripts']) == 1
+    assert len(seen['summaries']) == 1
+    assert os.path.basename(result['transcript_path']) == seen['transcripts'][0]
+    assert os.path.basename(result['summary_path']) == seen['summaries'][0]
+
+
+def test_retranscribing_a_renamed_recording_reuses_its_start_timestamp(monkeypatch, tmp_path):
+    _mock_pipeline(monkeypatch, tmp_path)
+    wav = _recording(tmp_path)
+    config = _transcribe_config(tmp_path)
+
+    first = asyncio.run(transcriber.transcribe(str(wav), config=config))
+    second = asyncio.run(transcriber.transcribe(first['recording_path'], config=config))
+
+    # Same start timestamp, so same month folder and same output filenames - the rename in
+    # between must not push the run onto the file's mtime.
+    assert second['transcript_path'] == first['transcript_path']
+    assert second['summary_path'] == first['summary_path']
+    assert second['recording_path'] == first['recording_path']
