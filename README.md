@@ -20,6 +20,9 @@ Markdown transcripts and LLM-generated summaries, optionally enriched with your 
   transcribed via an OpenAI-compatible API (OpenRouter by default), and written out as a
   full-text Markdown transcript plus a structured Markdown summary with an LLM-generated title.
   The source `.wav` is never deleted or moved, so transcription can always be re-run.
+- **[Speaker diarization](#speaker-diarization-transcription_diarization)** *(optional)* — tags
+  each transcript line with `Speaker N:` when `transcription_model` is one meet-recorder knows how
+  to request diarization for (currently `microsoft/mai-transcribe-2`).
 - **[Google Calendar integration](#google-calendar-optional)** *(optional)* — matches each
   recording to the calendar event it belongs to (using the event's title and attendees in the
   output), and prompts you at a meeting's start time asking whether to record — recording never
