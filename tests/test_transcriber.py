@@ -377,16 +377,36 @@ def test_transcribe_chunk_omits_diarization_options_by_default(monkeypatch, tmp_
     assert 'response_format' not in captured['payload']
 
 
-def test_transcribe_chunk_requests_azure_diarization_when_enabled(monkeypatch, tmp_path):
+def test_transcribe_chunk_requests_azure_diarization_for_supported_model(monkeypatch, tmp_path):
     chunk = tmp_path / 'chunk.mp3'
     chunk.write_bytes(b'audio')
     captured = {}
     _stub_transcription_post(monkeypatch, captured)
 
-    transcriber._transcribe_chunk(str(chunk), _chunk_config(transcription_diarization=True))
+    transcriber._transcribe_chunk(str(chunk), _chunk_config(
+        transcription_model='microsoft/mai-transcribe-2', transcription_diarization=True,
+    ))
 
     assert captured['payload']['response_format'] == 'verbose_json'
     assert captured['payload']['provider'] == {'options': {'azure': {'diarization': {'enabled': True}}}}
+
+
+def test_transcribe_chunk_warns_and_skips_diarization_for_unsupported_model(monkeypatch, tmp_path, caplog):
+    chunk = tmp_path / 'chunk.mp3'
+    chunk.write_bytes(b'audio')
+    captured = {}
+    _stub_transcription_post(monkeypatch, captured)
+
+    with caplog.at_level('WARNING'):
+        text = transcriber._transcribe_chunk(str(chunk), _chunk_config(
+            transcription_model='some/other-model', transcription_diarization=True,
+        ))
+
+    assert 'provider' not in captured['payload']
+    assert 'response_format' not in captured['payload']
+    assert text == 'chunk text'
+    assert 'some/other-model' in caplog.text
+    assert 'no known diarization support' in caplog.text
 
 
 def test_transcribe_chunk_returns_speaker_labeled_text_when_diarized(monkeypatch, tmp_path):
@@ -407,7 +427,9 @@ def test_transcribe_chunk_returns_speaker_labeled_text_when_diarized(monkeypatch
         lambda url, json, headers, timeout: Mock(raise_for_status=lambda: None, json=lambda: diarized_response),
     )
 
-    text = transcriber._transcribe_chunk(str(chunk), _chunk_config(transcription_diarization=True))
+    text = transcriber._transcribe_chunk(str(chunk), _chunk_config(
+        transcription_model='microsoft/mai-transcribe-2', transcription_diarization=True,
+    ))
 
     assert text == 'Speaker 0: Oi tudo bem mesmo\nSpeaker 1: sim e você'
 
