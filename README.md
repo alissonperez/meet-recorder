@@ -243,6 +243,28 @@ Output files are named `TIMESTAMP - Title-Slug.md`, where `TIMESTAMP` and the `Y
 are derived from the recording's start time (parsed from the `.wav` filename), and `Title-Slug`
 is the generated title slugified (and capped to 80 characters).
 
+#### Speaker diarization (`transcription_diarization`)
+
+The parameters needed to request diarization are provider-specific, so `transcription_diarization`
+only takes effect for a `transcription_model` meet-recorder knows how to build that request for.
+These are registered in `DIARIZATION_PAYLOAD_BUILDERS` in `meet_recorder/transcriber.py`:
+
+```python
+DIARIZATION_PAYLOAD_BUILDERS = {
+    'microsoft/mai-transcribe-2': _azure_diarization_payload,
+}
+```
+
+For any other model, enabling `transcription_diarization` is a no-op: a warning is logged and the
+transcription request is sent without diarization fields. This is deliberate — sending an
+unsupported model diarization-only fields (e.g. Azure's `provider.options`) tends to fail the
+whole request with a `400 Bad Request`, so unsupported models fall back instead of breaking.
+
+To add support for another model/provider, add an entry mapping its model id to a function
+returning the extra payload fields that provider expects (see `_azure_diarization_payload` for an
+example), then, if that provider's response shape differs from the `segments[].speaker` +
+`segments[].text` shape `_diarized_text()` already handles, extend that parsing too.
+
 For what each of the three prompts (`transcription_prompt`, `summary_prompt`, `title_prompt`)
 does, what dynamic calendar-event context is prepended to each, and an example of the output
 frontmatter, see [`docs/prompts.md`](./docs/prompts.md).
