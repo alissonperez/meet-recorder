@@ -133,6 +133,35 @@ def _post_with_retry(url, payload, headers):
             time.sleep(backoff)
 
 
+def _diarized_text(data):
+    '''Build speaker-labeled text from a verbose_json response with per-segment `speaker`
+    (set by OpenRouter when Azure diarization is enabled), joining consecutive segments from
+    the same speaker into one line. Falls back to the plain `text` field when the response
+    carries no segments (e.g. the provider silently ignored the diarization request).'''
+    segments = data.get('segments') or []
+    if not segments:
+        return data.get('text', '')
+
+    lines = []
+    current_speaker = object()  # sentinel: never equals a real speaker value
+    current_parts = []
+
+    def flush():
+        if current_parts:
+            lines.append(f'Speaker {current_speaker}: {"".join(current_parts).strip()}')
+
+    for segment in segments:
+        speaker = segment.get('speaker')
+        if speaker != current_speaker:
+            flush()
+            current_speaker = speaker
+            current_parts = []
+        current_parts.append(segment.get('text', ''))
+    flush()
+
+    return '\n'.join(lines)
+
+
 def _transcribe_chunk(chunk_path, config, event=None):
     with open(chunk_path, 'rb') as f:
         audio_b64 = base64.b64encode(f.read()).decode('ascii')
@@ -142,6 +171,13 @@ def _transcribe_chunk(chunk_path, config, event=None):
         'input_audio': {'data': audio_b64, 'format': 'mp3'},
         'language': 'pt',
     }
+
+    if config.transcription_diarization:
+        # Azure-specific passthrough (see OpenRouter's `provider.options` mechanism); only
+        # takes effect on providers/models that support it (e.g. microsoft/mai-transcribe-2).
+        payload['response_format'] = 'verbose_json'
+        payload['timestamp_granularities'] = ['segment']
+        payload['provider'] = {'options': {'azure': {'diarization': {'enabled': True}}}}
 
     prompt = config.transcription_prompt or ''
     if event is not None:
@@ -155,8 +191,11 @@ def _transcribe_chunk(chunk_path, config, event=None):
     headers = {'Authorization': f'Bearer {_api_key()}', 'Content-Type': 'application/json'}
 
     response = _post_with_retry(url, payload, headers)
+    data = response.json()
 
-    return response.json().get('text', '')
+    if config.transcription_diarization:
+        return _diarized_text(data)
+    return data.get('text', '')
 
 
 def _transcribe_audio(mp3_path, config, event=None):

@@ -237,6 +237,7 @@ adjust it. All fields are required unless noted otherwise:
 | `chunk_duration` | *(optional, default `420`, i.e. 7 minutes)* Seconds per chunk; longer recordings are split into sequential, non-overlapping chunks before transcription. |
 | `base_url` | *(optional, default `https://openrouter.ai/api/v1`)* Base URL of the OpenAI-compatible API used for both transcription and chat completions. |
 | `transcription_max_retries` | *(optional, default `72`)* How many attempts a failed transcription gets before it is abandoned and the failure notification fires. Menu bar app only; at the fixed hourly retry interval the default spans roughly 3 days. |
+| `transcription_diarization` | *(optional, default `false`)* Tag each transcript line with `Speaker N:`. Only takes effect on a `transcription_model`/provider that supports it (e.g. `microsoft/mai-transcribe-2` via its Azure backend on OpenRouter); other models ignore the request. If enabled, update `summary_prompt` too — the default instructs the summary model not to attribute speech to people. |
 
 Output files are named `TIMESTAMP - Title-Slug.md`, where `TIMESTAMP` and the `YYYY-MM` folder
 are derived from the recording's start time (parsed from the `.wav` filename), and `Title-Slug`

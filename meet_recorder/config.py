@@ -108,6 +108,7 @@ class Config:
         self.transcription_max_retries = min(MAX_TRANSCRIPTION_MAX_RETRIES, max(1, int(
             data.get('transcription_max_retries', DEFAULT_TRANSCRIPTION_MAX_RETRIES)
         )))
+        self.transcription_diarization = bool(data.get('transcription_diarization', False))
 
         # Optional, additive Google Calendar section. Absent -> feature disabled.
         self.calendars = [c['name'] for c in (data.get('calendars') or [])]
