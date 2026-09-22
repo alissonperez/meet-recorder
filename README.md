@@ -20,6 +20,9 @@ Markdown transcripts and LLM-generated summaries, optionally enriched with your 
   transcribed via an OpenAI-compatible API (OpenRouter by default), and written out as a
   full-text Markdown transcript plus a structured Markdown summary with an LLM-generated title.
   The source `.wav` is never deleted or moved, so transcription can always be re-run.
+- **[Speaker diarization](#speaker-diarization-transcription_diarization)** *(optional)* — tags
+  each transcript line with `Speaker N:` when `transcription_model` is one meet-recorder knows how
+  to request diarization for (currently `microsoft/mai-transcribe-2`).
 - **[Google Calendar integration](#google-calendar-optional)** *(optional)* — matches each
   recording to the calendar event it belongs to (using the event's title and attendees in the
   output), and prompts you at a meeting's start time asking whether to record — recording never
@@ -237,10 +240,33 @@ adjust it. All fields are required unless noted otherwise:
 | `chunk_duration` | *(optional, default `420`, i.e. 7 minutes)* Seconds per chunk; longer recordings are split into sequential, non-overlapping chunks before transcription. |
 | `base_url` | *(optional, default `https://openrouter.ai/api/v1`)* Base URL of the OpenAI-compatible API used for both transcription and chat completions. |
 | `transcription_max_retries` | *(optional, default `72`)* How many attempts a failed transcription gets before it is abandoned and the failure notification fires. Menu bar app only; at the fixed hourly retry interval the default spans roughly 3 days. |
+| `transcription_diarization` | *(optional, default `false`)* Tag each transcript line with `Speaker N:`. Only takes effect when `transcription_model` is one meet-recorder knows how to request diarization for (currently just `microsoft/mai-transcribe-2`, via its Azure backend on OpenRouter) — for any other model it's a no-op and a warning is logged. If enabled, update `summary_prompt` too — the default instructs the summary model not to attribute speech to people. |
 
 Output files are named `TIMESTAMP - Title-Slug.md`, where `TIMESTAMP` and the `YYYY-MM` folder
 are derived from the recording's start time (parsed from the `.wav` filename), and `Title-Slug`
 is the generated title slugified (and capped to 80 characters).
+
+#### Speaker diarization (`transcription_diarization`)
+
+The parameters needed to request diarization are provider-specific, so `transcription_diarization`
+only takes effect for a `transcription_model` meet-recorder knows how to build that request for.
+These are registered in `DIARIZATION_PAYLOAD_BUILDERS` in `meet_recorder/transcriber.py`:
+
+```python
+DIARIZATION_PAYLOAD_BUILDERS = {
+    'microsoft/mai-transcribe-2': _azure_diarization_payload,
+}
+```
+
+For any other model, enabling `transcription_diarization` is a no-op: a warning is logged and the
+transcription request is sent without diarization fields. This is deliberate — sending an
+unsupported model diarization-only fields (e.g. Azure's `provider.options`) tends to fail the
+whole request with a `400 Bad Request`, so unsupported models fall back instead of breaking.
+
+To add support for another model/provider, add an entry mapping its model id to a function
+returning the extra payload fields that provider expects (see `_azure_diarization_payload` for an
+example), then, if that provider's response shape differs from the `segments[].speaker` +
+`segments[].text` shape `_diarized_text()` already handles, extend that parsing too.
 
 For what each of the three prompts (`transcription_prompt`, `summary_prompt`, `title_prompt`)
 does, what dynamic calendar-event context is prepended to each, and an example of the output

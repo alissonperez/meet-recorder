@@ -45,6 +45,18 @@ base_url: https://openrouter.ai/api/v1
 # this count is also the retry window in hours. Optional; default 72 (~3 days).
 # transcription_max_retries: 72
 
+# Enable speaker diarization, tagging each transcript line with "Speaker N: ...".
+# Only takes effect when transcription_model is one meet-recorder knows how to request
+# diarization for (see DIARIZATION_PAYLOAD_BUILDERS in meet_recorder/transcriber.py;
+# currently just microsoft/mai-transcribe-2, via its Azure backend on OpenRouter) - for
+# any other model this is a no-op and a warning is logged instead, since sending an
+# unsupported model a diarization request tends to fail the whole transcription with a
+# 400. Optional; default false.
+# If you enable this, update your summary_prompt: the default one below tells the
+# summary model not to attribute speech to people, which no longer holds once the
+# transcript carries speaker labels.
+# transcription_diarization: false
+
 # --- Google Calendar integration (OPTIONAL) ---------------------------------
 # Entirely optional. If the `calendars:` list below is omitted, the calendar
 # feature is disabled and the app behaves exactly as without it: transcription

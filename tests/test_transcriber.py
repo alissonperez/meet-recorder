@@ -317,12 +317,15 @@ def test_ingest_doc_falls_back_to_llm_title_when_not_given(monkeypatch, tmp_path
     assert 'title: "LLM Title"' in transcript
 
 
-def _chunk_config():
-    return Mock(
+def _chunk_config(**overrides):
+    kwargs = dict(
         transcription_model='stt',
         transcription_prompt='Transcreva o áudio.',
         base_url='https://example.test/v1',
+        transcription_diarization=False,
     )
+    kwargs.update(overrides)
+    return Mock(**kwargs)
 
 
 def _stub_transcription_post(monkeypatch, captured):
@@ -360,6 +363,79 @@ def test_transcribe_chunk_sends_prompt_as_is_without_event(monkeypatch, tmp_path
     transcriber._transcribe_chunk(str(chunk), _chunk_config())
 
     assert captured['payload']['prompt'] == 'Transcreva o áudio.'
+
+
+def test_transcribe_chunk_omits_diarization_options_by_default(monkeypatch, tmp_path):
+    chunk = tmp_path / 'chunk.mp3'
+    chunk.write_bytes(b'audio')
+    captured = {}
+    _stub_transcription_post(monkeypatch, captured)
+
+    transcriber._transcribe_chunk(str(chunk), _chunk_config())
+
+    assert 'provider' not in captured['payload']
+    assert 'response_format' not in captured['payload']
+
+
+def test_transcribe_chunk_requests_azure_diarization_for_supported_model(monkeypatch, tmp_path):
+    chunk = tmp_path / 'chunk.mp3'
+    chunk.write_bytes(b'audio')
+    captured = {}
+    _stub_transcription_post(monkeypatch, captured)
+
+    transcriber._transcribe_chunk(str(chunk), _chunk_config(
+        transcription_model='microsoft/mai-transcribe-2', transcription_diarization=True,
+    ))
+
+    assert captured['payload']['response_format'] == 'verbose_json'
+    assert captured['payload']['provider'] == {'options': {'azure': {'diarization': {'enabled': True}}}}
+
+
+def test_transcribe_chunk_warns_and_skips_diarization_for_unsupported_model(monkeypatch, tmp_path, caplog):
+    chunk = tmp_path / 'chunk.mp3'
+    chunk.write_bytes(b'audio')
+    captured = {}
+    _stub_transcription_post(monkeypatch, captured)
+
+    with caplog.at_level('WARNING'):
+        text = transcriber._transcribe_chunk(str(chunk), _chunk_config(
+            transcription_model='some/other-model', transcription_diarization=True,
+        ))
+
+    assert 'provider' not in captured['payload']
+    assert 'response_format' not in captured['payload']
+    assert text == 'chunk text'
+    assert 'some/other-model' in caplog.text
+    assert 'no known diarization support' in caplog.text
+
+
+def test_transcribe_chunk_returns_speaker_labeled_text_when_diarized(monkeypatch, tmp_path):
+    chunk = tmp_path / 'chunk.mp3'
+    chunk.write_bytes(b'audio')
+    monkeypatch.setenv('OPENROUTER_API_KEY', 'test-key')
+
+    diarized_response = {
+        'text': 'Oi tudo bem sim e você',
+        'segments': [
+            {'speaker': 0, 'text': 'Oi tudo bem'},
+            {'speaker': 0, 'text': ' mesmo'},
+            {'speaker': 1, 'text': 'sim e você'},
+        ],
+    }
+    monkeypatch.setattr(
+        transcriber.httpx, 'post',
+        lambda url, json, headers, timeout: Mock(raise_for_status=lambda: None, json=lambda: diarized_response),
+    )
+
+    text = transcriber._transcribe_chunk(str(chunk), _chunk_config(
+        transcription_model='microsoft/mai-transcribe-2', transcription_diarization=True,
+    ))
+
+    assert text == 'Speaker 0: Oi tudo bem mesmo\nSpeaker 1: sim e você'
+
+
+def test_diarized_text_falls_back_to_plain_text_without_segments():
+    assert transcriber._diarized_text({'text': 'plain text', 'segments': []}) == 'plain text'
 
 
 def test_transcribe_audio_threads_event_to_each_chunk(monkeypatch):

@@ -133,6 +133,55 @@ def _post_with_retry(url, payload, headers):
             time.sleep(backoff)
 
 
+def _azure_diarization_payload():
+    '''Payload fields that request Azure-backed speaker diarization (see OpenRouter's
+    `provider.options` passthrough mechanism).'''
+    return {
+        'response_format': 'verbose_json',
+        'timestamp_granularities': ['segment'],
+        'provider': {'options': {'azure': {'diarization': {'enabled': True}}}},
+    }
+
+
+# Diarization request shape is provider-specific, so it's opt-in per model rather than
+# unconditionally attached whenever transcription_diarization is set: sending Azure-only
+# fields (or any diarization request at all) to a model/provider that doesn't understand
+# them fails the whole transcription with a 400, instead of just transcribing without
+# speaker labels.
+DIARIZATION_PAYLOAD_BUILDERS = {
+    'microsoft/mai-transcribe-2': _azure_diarization_payload,
+}
+
+
+def _diarized_text(data):
+    '''Build speaker-labeled text from a verbose_json response with per-segment `speaker`
+    (set by OpenRouter when Azure diarization is enabled), joining consecutive segments from
+    the same speaker into one line. Falls back to the plain `text` field when the response
+    carries no segments (e.g. the provider silently ignored the diarization request).'''
+    segments = data.get('segments') or []
+    if not segments:
+        return data.get('text', '')
+
+    lines = []
+    current_speaker = object()  # sentinel: never equals a real speaker value
+    current_parts = []
+
+    def flush():
+        if current_parts:
+            lines.append(f'Speaker {current_speaker}: {"".join(current_parts).strip()}')
+
+    for segment in segments:
+        speaker = segment.get('speaker')
+        if speaker != current_speaker:
+            flush()
+            current_speaker = speaker
+            current_parts = []
+        current_parts.append(segment.get('text', ''))
+    flush()
+
+    return '\n'.join(lines)
+
+
 def _transcribe_chunk(chunk_path, config, event=None):
     with open(chunk_path, 'rb') as f:
         audio_b64 = base64.b64encode(f.read()).decode('ascii')
@@ -142,6 +191,18 @@ def _transcribe_chunk(chunk_path, config, event=None):
         'input_audio': {'data': audio_b64, 'format': 'mp3'},
         'language': 'pt',
     }
+
+    diarization_requested = False
+    if config.transcription_diarization:
+        build_diarization_payload = DIARIZATION_PAYLOAD_BUILDERS.get(config.transcription_model)
+        if build_diarization_payload is None:
+            logger.warning(
+                f'transcription_diarization is enabled but "{config.transcription_model}" has no '
+                'known diarization support configured; transcribing without speaker labels'
+            )
+        else:
+            payload.update(build_diarization_payload())
+            diarization_requested = True
 
     prompt = config.transcription_prompt or ''
     if event is not None:
@@ -155,8 +216,11 @@ def _transcribe_chunk(chunk_path, config, event=None):
     headers = {'Authorization': f'Bearer {_api_key()}', 'Content-Type': 'application/json'}
 
     response = _post_with_retry(url, payload, headers)
+    data = response.json()
 
-    return response.json().get('text', '')
+    if diarization_requested:
+        return _diarized_text(data)
+    return data.get('text', '')
 
 
 def _transcribe_audio(mp3_path, config, event=None):
