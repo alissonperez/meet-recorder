@@ -9,7 +9,7 @@ from AppKit import NSAlert, NSApplication, NSImage, NSPopUpButton, NSStatusWindo
 from Foundation import NSMakeRect
 from PyObjCTools import AppHelper
 
-from meet_recorder import calendar, drive, meet_ingest, recorder, transcriber, transcription_retry
+from meet_recorder import calendar, drive, folder_ingest, meet_ingest, recorder, transcriber, transcription_retry
 from meet_recorder.config import load_config
 
 logger = logging.getLogger(__name__)
@@ -24,6 +24,7 @@ ICON_STATES = ('idle', 'recording', 'transcribing', 'recording_transcribing')
 RECOVERY_SCAN_DELAY_SECONDS = 1
 AUTORECORD_FAILURE_NOTIFY_THRESHOLD = 3
 MEET_INGEST_FAILURE_NOTIFY_THRESHOLD = 3
+FOLDER_INGEST_FAILURE_NOTIFY_THRESHOLD = 3
 # Well under the ledger's 1h retry interval, so a due entry is picked up promptly;
 # a scan with nothing due is just one ledger read.
 TRANSCRIPTION_RETRY_SCAN_INTERVAL_SECONDS = 5 * 60
@@ -89,6 +90,10 @@ class MenubarApp(rumps.App):
         self._meet_poll_timer = self._build_meet_poll_timer()
         self._meet_poll_kickoff_timer = rumps.Timer(self._run_meet_poll_kickoff, RECOVERY_SCAN_DELAY_SECONDS)
 
+        self._folder_poll_failures = 0
+        self._folder_poll_timer = self._build_folder_poll_timer()
+        self._folder_poll_kickoff_timer = rumps.Timer(self._run_folder_poll_kickoff, RECOVERY_SCAN_DELAY_SECONDS)
+
         self._transcription_retry_timer = rumps.Timer(
             self._run_transcription_retry_scan, TRANSCRIPTION_RETRY_SCAN_INTERVAL_SECONDS
         )
@@ -111,6 +116,15 @@ class MenubarApp(rumps.App):
                 f'look-back {self.config.meet_transcripts.lookback_hours}h'
             )
 
+        if self._folder_poll_timer is None:
+            logger.info('Folder-transcript ingestion inactive (see debug log above for why)')
+        else:
+            logger.info(
+                'Folder-transcript ingestion active: '
+                f'polling every {self.config.folder_ingest.poll_interval_minutes}min, '
+                f'{len(self.config.folder_ingest.directories)} director(ies)'
+            )
+
     def _load_icons(self):
         return {state: self._build_nsimage(os.path.join(ASSET_DIR, f'{state}.png')) for state in ICON_STATES}
 
@@ -130,6 +144,9 @@ class MenubarApp(rumps.App):
         if self._meet_poll_timer is not None:
             self._meet_poll_timer.start()
             self._meet_poll_kickoff_timer.start()
+        if self._folder_poll_timer is not None:
+            self._folder_poll_timer.start()
+            self._folder_poll_kickoff_timer.start()
         self._transcription_retry_timer.start()
         super().run(**options)
 
@@ -228,6 +245,63 @@ class MenubarApp(rumps.App):
 
         if self._meet_poll_failures == MEET_INGEST_FAILURE_NOTIFY_THRESHOLD:
             self._notify('Falha na ingestão', f'Não foi possível ingerir transcrições do Meet: {error}')
+
+    def _folder_ingest_active(self):
+        if self.config is None:
+            logger.debug('Folder-transcript ingestion disabled: config failed to load')
+            return False
+        folder = getattr(self.config, 'folder_ingest', None)
+        if folder is None or not folder.enabled:
+            logger.debug('Folder-transcript ingestion disabled: folder_ingest.enabled is false in config')
+            return False
+        if not folder.directories:
+            logger.debug('Folder-transcript ingestion disabled: no `folder_ingest.directories` configured')
+            return False
+        return True
+
+    def _build_folder_poll_timer(self):
+        if not self._folder_ingest_active():
+            return None
+
+        interval = self.config.folder_ingest.poll_interval_minutes * 60
+        return rumps.Timer(self._run_folder_poll, interval)
+
+    def _run_folder_poll_kickoff(self, sender):
+        # Mirror the Meet-ingest kickoff: files dropped while the app was off are picked up
+        # right away instead of waiting a full poll interval after startup.
+        logger.debug('Running immediate folder-transcript ingest on startup')
+        sender.stop()
+        self._run_folder_poll(sender)
+
+    def _run_folder_poll(self, sender):
+        thread = threading.Thread(target=self._folder_ingest_in_background, daemon=True)
+        thread.start()
+
+    def _folder_ingest_in_background(self):
+        self._begin_transcription()
+
+        try:
+            results = folder_ingest.ingest_once(self.config, on_failure=self._on_folder_file_abandoned)
+            self._folder_poll_failures = 0
+            for result in results:
+                logger.info(f'Folder transcript ingested: {result["transcript_path"]}')
+        except Exception as e:
+            self._on_folder_poll_failure(e)
+        finally:
+            self._end_transcription()
+
+    def _on_folder_file_abandoned(self, path, error):
+        self._notify(
+            'Falha na ingestão',
+            f'Desistimos de "{os.path.basename(path)}" (movido para failed/): {error}',
+        )
+
+    def _on_folder_poll_failure(self, error):
+        self._folder_poll_failures += 1
+        logger.warning(f'Folder-transcript ingest poll failed: {error}')
+
+        if self._folder_poll_failures == FOLDER_INGEST_FAILURE_NOTIFY_THRESHOLD:
+            self._notify('Falha na ingestão', f'Não foi possível ingerir transcrições da pasta: {error}')
 
     def _run_recovery_scan(self, sender):
         sender.stop()

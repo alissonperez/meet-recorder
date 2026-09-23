@@ -4,7 +4,9 @@ import time
 
 from icecream import ic
 
-from meet_recorder import calendar, consolecolor as ccolor, drive, meet_ingest, menubar, recorder, transcriber
+from meet_recorder import (
+    calendar, consolecolor as ccolor, drive, folder_ingest, meet_ingest, menubar, recorder, transcriber,
+)
 from meet_recorder.config import load_config
 from meet_recorder.tools import handler
 
@@ -92,6 +94,25 @@ async def handler_meet_transcripts():
     except drive.DriveScopeError as e:
         logger.error(str(e))
         return
+
+    if not results:
+        logger.info('Nothing to ingest')
+        return
+
+    for result in results:
+        logger.info(f'Transcript saved to {ccolor.green(result["transcript_path"])}')
+        logger.info(f'Summary saved to {ccolor.green(result["summary_path"])}')
+
+
+@handler
+def handler_folder_ingest():
+    '''Ingest .txt/.md transcripts/notes dropped into the configured `folder_ingest` directories
+    into transcript + summary files, moving each processed file into a `processed/` subfolder'''
+
+    ic('ingesting folder transcripts')
+
+    config = load_config()
+    results = folder_ingest.ingest_once(config)
 
     if not results:
         logger.info('Nothing to ingest')
