@@ -190,6 +190,39 @@ The system SHALL, when the `meet_transcripts` feature is enabled and at least on
 - **WHEN** ingestion polls fail repeatedly and reach the failure-notification threshold
 - **THEN** a notification informs the user, mirroring the auto-record poll-failure behavior, without aborting the app
 
+### Requirement: Periodic folder-ingest poller
+The system SHALL, when the `folder_ingest` feature is enabled with at
+least one configured directory, run a background poller in the menu bar
+app that periodically scans and processes folder-sourced transcripts at
+the configured poll interval, reflecting in-progress ingestion in the
+existing transcribing icon state. When the feature is disabled or no
+directory is configured, the poller SHALL NOT run.
+
+#### Scenario: Poller runs when enabled
+- **WHEN** the menu bar app starts with `folder_ingest.enabled` true and at
+  least one directory configured
+- **THEN** a scan executes shortly after startup and then repeats at the
+  configured poll interval, each run scanning and processing files in a
+  background daemon thread
+
+#### Scenario: Ingestion reflected in the icon
+- **WHEN** a background folder-ingest scan is in progress
+- **THEN** the menu bar icon shows the transcribing state (combinable with
+  the recording state), and returns to its prior state when the run
+  completes, whether it succeeded or failed
+
+#### Scenario: Poller inactive when disabled or unconfigured
+- **WHEN** the menu bar app starts with the `folder_ingest` feature
+  disabled or with no directories configured
+- **THEN** no folder-ingest poller is started and menu bar behavior is
+  otherwise unchanged
+
+#### Scenario: Repeated poll failures surfaced
+- **WHEN** folder-ingest scans fail repeatedly and reach the
+  failure-notification threshold
+- **THEN** a notification informs the user, mirroring the Meet-ingestion
+  poll-failure behavior, without aborting the app
+
 ### Requirement: Deferred retry for failed menu bar transcriptions
 The system SHALL, when a transcription started by the menu bar app fails after its immediate per-request retries are exhausted or bypassed as non-retryable, record that recording's `.wav` path in a persistent deferred-retry ledger rather than treating the failure as terminal, and SHALL later retry the full transcription pipeline (preprocessing through output-file writing) for that file on a fixed one-hour retry interval. Deferral SHALL apply identically to transcriptions started from the normal stop-recording flow and from the crash-recovery process action. A deferred entry SHALL remain identified by the recording's path as it was when the entry was created; because a successful run may rename the recording as its final step, the system SHALL clear a succeeding retry's entry under that original path, so a rename can never strand an entry that would otherwise be retried until its budget ran out.
 

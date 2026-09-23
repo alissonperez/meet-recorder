@@ -436,10 +436,16 @@ def ingest_doc(url, config, account, title=None):
         raise TranscriptionError(f'Could not extract a Google Doc id from URL: {url}')
 
     transcript_text = drive.export_doc_markdown(account, doc_id)
+    return ingest_text(transcript_text, config, title=title)
 
+
+def ingest_text(transcript_text, config, title=None, timestamp=None):
+    '''Run already-available transcript text through the standard summary/title/output
+    pipeline (no calendar event, no audio). The title is LLM-generated unless given, and the
+    output is timestamped `timestamp` (default: now).'''
     summary_text = _generate_summary(transcript_text, config)
     resolved_title = title or _generate_title(summary_text, config)
-    timestamp = datetime.now()
+    timestamp = timestamp or datetime.now()
 
     transcript_path = _write_markdown(
         config.transcript_dir, timestamp, _build_base_filename(timestamp, resolved_title),

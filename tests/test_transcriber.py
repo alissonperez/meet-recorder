@@ -317,6 +317,65 @@ def test_ingest_doc_falls_back_to_llm_title_when_not_given(monkeypatch, tmp_path
     assert 'title: "LLM Title"' in transcript
 
 
+def test_ingest_doc_timestamps_output_with_now(monkeypatch, tmp_path):
+    monkeypatch.setattr(transcriber.drive, 'export_doc_markdown', lambda account, doc_id: 'transcript body')
+    monkeypatch.setattr(transcriber, '_generate_summary', lambda t, c: 'summary body')
+
+    before = datetime.now()
+    url = 'https://docs.google.com/document/d/doc123/edit'
+    result = transcriber.ingest_doc(url, _ingest_config(tmp_path), 'work-account', title='T')
+
+    assert os.path.basename(os.path.dirname(result['transcript_path'])) == before.strftime('%Y-%m')
+
+
+def test_ingest_text_generates_title_when_not_given(monkeypatch, tmp_path):
+    monkeypatch.setattr(transcriber, '_generate_summary', lambda t, c: 'summary body')
+    gen_title = Mock(return_value='LLM Title')
+    monkeypatch.setattr(transcriber, '_generate_title', gen_title)
+
+    result = transcriber.ingest_text('notes body', _ingest_config(tmp_path))
+
+    gen_title.assert_called_once()
+    assert gen_title.call_args.args[0] == 'summary body'
+    transcript = open(result['transcript_path']).read()
+    assert 'title: "LLM Title"' in transcript
+    assert 'notes body' in transcript
+    assert 'summary body' in open(result['summary_path']).read()
+
+
+def test_ingest_text_uses_given_title_without_llm(monkeypatch, tmp_path):
+    monkeypatch.setattr(transcriber, '_generate_summary', lambda t, c: 'summary body')
+    gen_title = Mock()
+    monkeypatch.setattr(transcriber, '_generate_title', gen_title)
+
+    result = transcriber.ingest_text('notes body', _ingest_config(tmp_path), title='Given Title')
+
+    gen_title.assert_not_called()
+    assert 'title: "Given Title"' in open(result['transcript_path']).read()
+
+
+def test_ingest_text_uses_given_timestamp_for_folder_and_filename(monkeypatch, tmp_path):
+    monkeypatch.setattr(transcriber, '_generate_summary', lambda t, c: 'summary body')
+    timestamp = datetime(2025, 3, 4, 9, 30)
+
+    result = transcriber.ingest_text('notes body', _ingest_config(tmp_path), title='T', timestamp=timestamp)
+
+    expected_prefix = transcriber._build_base_filename(timestamp, 'T')
+    assert os.path.basename(os.path.dirname(result['transcript_path'])) == '2025-03'
+    assert os.path.basename(result['transcript_path']) == f'{expected_prefix}.md'
+    assert os.path.basename(os.path.dirname(result['summary_path'])) == '2025-03'
+    assert 'RESUMO' in os.path.basename(result['summary_path'])
+
+
+def test_ingest_text_defaults_timestamp_to_now(monkeypatch, tmp_path):
+    monkeypatch.setattr(transcriber, '_generate_summary', lambda t, c: 'summary body')
+
+    before = datetime.now()
+    result = transcriber.ingest_text('notes body', _ingest_config(tmp_path), title='T')
+
+    assert os.path.basename(os.path.dirname(result['transcript_path'])) == before.strftime('%Y-%m')
+
+
 def _chunk_config(**overrides):
     kwargs = dict(
         transcription_model='stt',

@@ -425,6 +425,121 @@ def test_meet_poll_failure_notifies_on_threshold(meet_app):
     meet_app._notify.assert_called_once()
 
 
+# --- Folder-transcript ingestion poller ---------------------------------------
+
+
+def _folder_app(monkeypatch, enabled=True, directories=('/inbox',)):
+    config = _StubConfig(enabled=False)
+    config.folder_ingest = SimpleNamespace(
+        enabled=enabled, directories=list(directories), poll_interval_minutes=5, max_attempts=3,
+    )
+    monkeypatch.setattr(menubar_module.MenubarApp, '_load_config_safe', lambda self: config)
+    monkeypatch.setattr(menubar_module.rumps.Timer, '__init__', lambda self, *a, **k: None)
+
+    instance = menubar_module.MenubarApp()
+    instance._notify = MagicMock()
+    return instance
+
+
+def test_folder_poller_active_when_enabled_with_directories(monkeypatch):
+    instance = _folder_app(monkeypatch)
+
+    assert instance._folder_ingest_active() is True
+    assert instance._folder_poll_timer is not None
+
+
+def test_folder_poller_disabled_when_feature_off(monkeypatch):
+    instance = _folder_app(monkeypatch, enabled=False)
+
+    assert instance._folder_ingest_active() is False
+    assert instance._folder_poll_timer is None
+
+
+def test_folder_poller_disabled_without_directories(monkeypatch):
+    instance = _folder_app(monkeypatch, directories=())
+
+    assert instance._folder_ingest_active() is False
+    assert instance._folder_poll_timer is None
+
+
+def test_folder_poller_disabled_when_section_absent(app):
+    # `app` fixture's stub config has no folder_ingest attribute at all.
+    assert app._folder_ingest_active() is False
+    assert app._folder_poll_timer is None
+
+
+def test_folder_poll_kickoff_stops_itself_and_runs_a_poll(monkeypatch):
+    instance = _folder_app(monkeypatch)
+    instance._run_folder_poll = MagicMock()
+    sender = MagicMock()
+
+    instance._run_folder_poll_kickoff(sender)
+
+    sender.stop.assert_called_once()
+    instance._run_folder_poll.assert_called_once_with(sender)
+
+
+def test_folder_ingest_in_background_wraps_counter(monkeypatch):
+    instance = _folder_app(monkeypatch)
+    seen = {}
+
+    def fake_ingest(config, on_failure=None):
+        seen['active_during'] = instance.active_transcriptions
+        return [{'transcript_path': 't.md', 'summary_path': 's.md'}]
+
+    monkeypatch.setattr(menubar_module.folder_ingest, 'ingest_once', fake_ingest)
+
+    instance._folder_ingest_in_background()
+
+    assert seen['active_during'] == 1
+    assert instance.active_transcriptions == 0
+
+
+def test_folder_ingest_in_background_decrements_counter_on_failure(monkeypatch):
+    instance = _folder_app(monkeypatch)
+    monkeypatch.setattr(
+        menubar_module.folder_ingest, 'ingest_once', MagicMock(side_effect=RuntimeError('boom')),
+    )
+
+    instance._folder_ingest_in_background()
+
+    assert instance.active_transcriptions == 0
+    assert instance._folder_poll_failures == 1
+
+
+def test_folder_poll_failure_notifies_on_threshold_and_resets_on_success(monkeypatch):
+    instance = _folder_app(monkeypatch)
+    ingest = MagicMock(side_effect=RuntimeError('x'))
+    monkeypatch.setattr(menubar_module.folder_ingest, 'ingest_once', ingest)
+
+    for _ in range(menubar_module.FOLDER_INGEST_FAILURE_NOTIFY_THRESHOLD - 1):
+        instance._folder_ingest_in_background()
+    instance._notify.assert_not_called()
+
+    instance._folder_ingest_in_background()
+    instance._notify.assert_called_once()
+
+    ingest.side_effect = None
+    ingest.return_value = []
+    instance._folder_ingest_in_background()
+    assert instance._folder_poll_failures == 0
+
+
+def test_folder_file_abandoned_callback_notifies(monkeypatch):
+    instance = _folder_app(monkeypatch)
+
+    def fake_ingest(config, on_failure=None):
+        on_failure('/inbox/notes.txt', RuntimeError('llm down'))
+        return []
+
+    monkeypatch.setattr(menubar_module.folder_ingest, 'ingest_once', fake_ingest)
+
+    instance._folder_ingest_in_background()
+
+    instance._notify.assert_called_once()
+    assert 'notes.txt' in instance._notify.call_args.args[1]
+
+
 def test_calendar_poll_kickoff_seeds_cache_and_runs_immediate_check(app_with_calendar, monkeypatch):
     event = _event(minutes_from_now=-5)
     monkeypatch.setattr(menubar_module.calendar, 'upcoming_events', MagicMock(return_value=[event]))

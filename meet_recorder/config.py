@@ -33,6 +33,10 @@ DEFAULT_MEET_MAX_ACCESS_RETRIES = 3
 MAX_MEET_LOOKBACK_HOURS = 48
 MAX_MEET_ACCESS_RETRIES = 24
 
+DEFAULT_FOLDER_INGEST_POLL_INTERVAL_MINUTES = 5
+# Failed files are retried on a fixed hourly interval, so this is also the retry window in hours.
+DEFAULT_FOLDER_INGEST_MAX_ATTEMPTS = 3
+
 DEFAULT_MEET_SUMMARY_PROMPT = (
     'Você é um assistente que resume transcrições de reuniões em português.\n'
     'A transcrição a seguir foi gerada pelo Google Meet e identifica quem fala.\n'
@@ -93,6 +97,20 @@ class MeetTranscriptsConfig:
         )))
 
 
+class FolderIngestConfig:
+    def __init__(self, data):
+        data = data or {}
+        self.directories = [os.path.expanduser(str(d)) for d in (data.get('directories') or [])]
+        # No directories to scan means there is nothing to enable.
+        self.enabled = bool(data.get('enabled', False)) and bool(self.directories)
+        self.poll_interval_minutes = max(1, int(
+            data.get('poll_interval_minutes', DEFAULT_FOLDER_INGEST_POLL_INTERVAL_MINUTES)
+        ))
+        self.max_attempts = max(1, int(
+            data.get('max_attempts', DEFAULT_FOLDER_INGEST_MAX_ATTEMPTS)
+        ))
+
+
 class Config:
     def __init__(self, data):
         self.transcription_model = data['transcription_model']
@@ -123,6 +141,7 @@ class Config:
         self.autorecord = AutoRecordConfig(data.get('autorecord'))
         self.meet_transcripts = MeetTranscriptsConfig(data.get('meet_transcripts'))
         self.meet_summary_prompt = data.get('meet_summary_prompt', DEFAULT_MEET_SUMMARY_PROMPT)
+        self.folder_ingest = FolderIngestConfig(data.get('folder_ingest'))
 
     @property
     def calendar_enabled(self):

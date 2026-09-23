@@ -31,6 +31,9 @@ Markdown transcripts and LLM-generated summaries, optionally enriched with your 
   Meet transcribed itself, pulls the transcript and Gemini notes from the calendar event's
   attachments and produces the same transcript + summary files without recording — on demand or on
   a background poll.
+- **[Folder transcript ingestion](#folder-transcript-ingestion)** *(optional)* — watches local
+  directories for dropped `.txt`/`.md` transcripts or notes and runs each through the same
+  transcript + summary pipeline — on demand or on a background poll.
 - **[Autostart at login](#autostart-at-login-launchd)** — a `launchd` LaunchAgent setup to keep
   the menu bar app running from login, with auto-relaunch if it exits.
 - **Crash recovery** — `python main.py recover` scans for orphaned in-progress recordings left
@@ -38,7 +41,8 @@ Markdown transcripts and LLM-generated summaries, optionally enriched with your 
 - **CLI commands** for everything: `record` (fixed-duration recording), `menubar`, `transcribe`
   (re-run the pipeline on any existing `.wav`), `meet_transcripts` (ingest Meet transcripts from
   calendar events), `ingest_transcript` (ingest a standalone Google Doc transcript, e.g. a meeting
-  you didn't attend), `calendar_auth`, and `recover` — see `poetry run python main.py --help`.
+  you didn't attend), `folder_ingest` (ingest `.txt`/`.md` files from configured directories),
+  `calendar_auth`, and `recover` — see `poetry run python main.py --help`.
 
 ## Requirements
 
@@ -482,6 +486,55 @@ $ poetry run python main.py ingest_transcript --url="https://docs.google.com/doc
   same as `transcribe` without a calendar match.
 - Output uses `summary_prompt` (not the speaker-aware `meet_summary_prompt`) and no event context is
   prepended, since there's no calendar occurrence to draw it from.
+
+## Folder transcript ingestion
+
+Text that just shows up on disk — a transcript exported from another tool, hand-written notes, a
+file synced from a note-taking app — can be run through the standard summary/output pipeline by
+dropping it into a watched directory. Register one or more directories under `folder_ingest` in
+`config.yaml`:
+
+```yaml
+folder_ingest:
+  enabled: true
+  directories:
+    - ~/Transcripts/Inbox
+  poll_interval_minutes: 5    # how often the menu bar app scans the directories
+  max_attempts: 3             # attempts (one per hour) before a failing file is given up on
+```
+
+Run one scan on demand:
+
+```
+$ poetry run python main.py folder_ingest
+```
+
+Or let the menu bar app poll in the background (it scans shortly after startup and then every
+`poll_interval_minutes`; the icon shows the transcribing state while a scan runs). The feature is
+off when `enabled` is false or `directories` is empty.
+
+How it works:
+
+- **What's picked up:** regular files ending in `.txt` or `.md` (case-insensitive) at the **top
+  level** of each configured directory. Subdirectories are never scanned. A directory that's
+  missing or unreadable is skipped with a warning; the other directories are still scanned.
+- **Output:** the file's text is summarized with `summary_prompt`, titled via `title_prompt`, and
+  written as transcript + summary Markdown into `transcript_dir`/`summary_dir`, timestamped with
+  the file's **modification time** (a closer proxy for when the meeting happened than the moment
+  the scan ran).
+- **Filesystem side effects:** the app moves files around inside every configured directory:
+  - `processed/` — a successfully ingested file is **moved** here, so it's never picked up again.
+    Drop a file with the same name again later and it's ingested again, then stored as
+    `name-1.txt`, `name-2.txt`, ….
+  - `failed/` — created only when a file is first given up on; the file is moved here and left
+    alone (same numeric-suffix rule on name clashes). The menu bar app notifies you when this
+    happens.
+- **Failures:** a file that can't be read as UTF-8 text, is empty, or fails anywhere in the
+  pipeline stays where it is and is retried on a **fixed hourly interval**, independent of
+  `poll_interval_minutes` — a 5-minute poll interval still retries a failing file at most once an
+  hour. After `max_attempts` it's moved into `failed/`. Retry state lives in
+  `~/.config/meet-recorder/processed_folder_ingest.json`; successfully ingested files are never
+  written there.
 
 ## Autostart at login (launchd)
 
