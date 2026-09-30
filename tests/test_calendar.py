@@ -38,6 +38,16 @@ def _event(summary, start, end=None, attendees=None, event_id='e1'):
     return node
 
 
+def _all_day_event(summary, date, event_id='allday'):
+    date_str = date.strftime('%Y-%m-%d') if hasattr(date, 'strftime') else date
+    return {
+        'id': event_id,
+        'summary': summary,
+        'start': {'date': date_str},
+        'end': {'date': date_str},
+    }
+
+
 # --- filters -----------------------------------------------------------------
 
 def test_is_declined_true_only_for_self_declined():
@@ -57,6 +67,16 @@ def test_matches_ignore_slug():
     assert calendar._matches_ignore_slug(event, ['lunch']) is True
     assert calendar._matches_ignore_slug(event, ['standup']) is False
     assert calendar._matches_ignore_slug(event, []) is False
+
+
+def test_is_all_day_true_only_for_date_only_start():
+    date_only = {'start': {'date': '2024-03-15'}}
+    timed = {'start': {'dateTime': '2024-03-15T10:00:00+00:00'}}
+    missing = {}
+
+    assert calendar._is_all_day(date_only) is True
+    assert calendar._is_all_day(timed) is False
+    assert calendar._is_all_day(missing) is False
 
 
 def test_parse_boundary_datetime_and_date():
@@ -103,6 +123,16 @@ def test_attendee_names_prefers_display_name_and_caps():
 
     assert calendar._attendee_names(event, max_attendees=20) == ['Alice', 'bob@example.com', 'Carol']
     assert calendar._attendee_names(event, max_attendees=1) == ['Alice']
+
+
+def test_eligible_events_drops_all_day_keeps_timed():
+    anchor = datetime(2024, 3, 15, 10, 0, tzinfo=UTC)
+    all_day = _all_day_event('Birthday', anchor.date(), event_id='allday')
+    timed = _event('Sync', anchor, event_id='timed')
+
+    result = list(calendar._eligible_events([all_day, timed], _config()))
+
+    assert [e['id'] for e in result] == ['timed']
 
 
 def test_extract_event_captures_fields():
@@ -202,6 +232,43 @@ def test_find_event_returns_none_on_error(monkeypatch):
 def test_find_event_none_when_no_candidates(monkeypatch):
     monkeypatch.setattr(calendar, '_query_events', lambda a, mn, mx: [])
     assert calendar.find_event(datetime.now(UTC), _config()) is None
+
+
+def test_find_event_none_when_only_all_day_candidate(monkeypatch):
+    anchor = datetime(2024, 3, 15, 10, 0, tzinfo=UTC)
+    all_day = _all_day_event('Birthday', anchor.date())
+
+    monkeypatch.setattr(
+        calendar, '_query_events',
+        lambda a, mn, mx: {'personal': [all_day], 'work': [all_day]}[a],
+    )
+
+    result = calendar.find_event(anchor, _config(calendars=['personal', 'work']))
+
+    assert result is None
+
+
+def test_find_event_timed_wins_over_all_day(monkeypatch):
+    anchor = datetime(2024, 3, 15, 10, 0, tzinfo=UTC)
+    all_day = _all_day_event('Birthday', anchor.date(), event_id='allday')
+    timed = _event('Sync', anchor + timedelta(minutes=2), event_id='timed')
+
+    monkeypatch.setattr(calendar, '_query_events', lambda a, mn, mx: [all_day, timed])
+
+    result = calendar.find_event(anchor, _config())
+
+    assert result.id == 'timed'
+
+
+def test_find_event_none_when_sole_candidate_outside_window(monkeypatch):
+    anchor = datetime(2024, 3, 15, 10, 0, tzinfo=UTC)
+    out_of_window = _event('Way Off', anchor + timedelta(hours=3), event_id='off')
+
+    monkeypatch.setattr(calendar, '_query_events', lambda a, mn, mx: [out_of_window])
+
+    result = calendar.find_event(anchor, _config())
+
+    assert result is None
 
 
 def test_is_accepted_true_only_for_self_accepted():

@@ -20,6 +20,9 @@ Markdown transcripts and LLM-generated summaries, optionally enriched with your 
   transcribed via an OpenAI-compatible API (OpenRouter by default), and written out as a
   full-text Markdown transcript plus a structured Markdown summary with an LLM-generated title.
   The source `.wav` is never deleted or moved, so transcription can always be re-run.
+- **[Speaker diarization](#speaker-diarization-transcription_diarization)** *(optional)* — tags
+  each transcript line with `Speaker N:` when `transcription_model` is one meet-recorder knows how
+  to request diarization for (currently `microsoft/mai-transcribe-2`).
 - **[Google Calendar integration](#google-calendar-optional)** *(optional)* — matches each
   recording to the calendar event it belongs to (using the event's title and attendees in the
   output), and prompts you at a meeting's start time asking whether to record — recording never
@@ -28,6 +31,9 @@ Markdown transcripts and LLM-generated summaries, optionally enriched with your 
   Meet transcribed itself, pulls the transcript and Gemini notes from the calendar event's
   attachments and produces the same transcript + summary files without recording — on demand or on
   a background poll.
+- **[Folder transcript ingestion](#folder-transcript-ingestion)** *(optional)* — watches local
+  directories for dropped `.txt`/`.md` transcripts or notes and runs each through the same
+  transcript + summary pipeline — on demand or on a background poll.
 - **[Autostart at login](#autostart-at-login-launchd)** — a `launchd` LaunchAgent setup to keep
   the menu bar app running from login, with auto-relaunch if it exits.
 - **Crash recovery** — `python main.py recover` scans for orphaned in-progress recordings left
@@ -35,7 +41,8 @@ Markdown transcripts and LLM-generated summaries, optionally enriched with your 
 - **CLI commands** for everything: `record` (fixed-duration recording), `menubar`, `transcribe`
   (re-run the pipeline on any existing `.wav`), `meet_transcripts` (ingest Meet transcripts from
   calendar events), `ingest_transcript` (ingest a standalone Google Doc transcript, e.g. a meeting
-  you didn't attend), `calendar_auth`, and `recover` — see `poetry run python main.py --help`.
+  you didn't attend), `folder_ingest` (ingest `.txt`/`.md` files from configured directories),
+  `calendar_auth`, and `recover` — see `poetry run python main.py --help`.
 
 ## Requirements
 
@@ -237,10 +244,33 @@ adjust it. All fields are required unless noted otherwise:
 | `chunk_duration` | *(optional, default `420`, i.e. 7 minutes)* Seconds per chunk; longer recordings are split into sequential, non-overlapping chunks before transcription. |
 | `base_url` | *(optional, default `https://openrouter.ai/api/v1`)* Base URL of the OpenAI-compatible API used for both transcription and chat completions. |
 | `transcription_max_retries` | *(optional, default `72`)* How many attempts a failed transcription gets before it is abandoned and the failure notification fires. Menu bar app only; at the fixed hourly retry interval the default spans roughly 3 days. |
+| `transcription_diarization` | *(optional, default `false`)* Tag each transcript line with `Speaker N:`. Only takes effect when `transcription_model` is one meet-recorder knows how to request diarization for (currently just `microsoft/mai-transcribe-2`, via its Azure backend on OpenRouter) — for any other model it's a no-op and a warning is logged. If enabled, update `summary_prompt` too — the default instructs the summary model not to attribute speech to people. |
 
 Output files are named `TIMESTAMP - Title-Slug.md`, where `TIMESTAMP` and the `YYYY-MM` folder
 are derived from the recording's start time (parsed from the `.wav` filename), and `Title-Slug`
 is the generated title slugified (and capped to 80 characters).
+
+#### Speaker diarization (`transcription_diarization`)
+
+The parameters needed to request diarization are provider-specific, so `transcription_diarization`
+only takes effect for a `transcription_model` meet-recorder knows how to build that request for.
+These are registered in `DIARIZATION_PAYLOAD_BUILDERS` in `meet_recorder/transcriber.py`:
+
+```python
+DIARIZATION_PAYLOAD_BUILDERS = {
+    'microsoft/mai-transcribe-2': _azure_diarization_payload,
+}
+```
+
+For any other model, enabling `transcription_diarization` is a no-op: a warning is logged and the
+transcription request is sent without diarization fields. This is deliberate — sending an
+unsupported model diarization-only fields (e.g. Azure's `provider.options`) tends to fail the
+whole request with a `400 Bad Request`, so unsupported models fall back instead of breaking.
+
+To add support for another model/provider, add an entry mapping its model id to a function
+returning the extra payload fields that provider expects (see `_azure_diarization_payload` for an
+example), then, if that provider's response shape differs from the `segments[].speaker` +
+`segments[].text` shape `_diarized_text()` already handles, extend that parsing too.
 
 For what each of the three prompts (`transcription_prompt`, `summary_prompt`, `title_prompt`)
 does, what dynamic calendar-event context is prepended to each, and an example of the output
@@ -456,6 +486,55 @@ $ poetry run python main.py ingest_transcript --url="https://docs.google.com/doc
   same as `transcribe` without a calendar match.
 - Output uses `summary_prompt` (not the speaker-aware `meet_summary_prompt`) and no event context is
   prepended, since there's no calendar occurrence to draw it from.
+
+## Folder transcript ingestion
+
+Text that just shows up on disk — a transcript exported from another tool, hand-written notes, a
+file synced from a note-taking app — can be run through the standard summary/output pipeline by
+dropping it into a watched directory. Register one or more directories under `folder_ingest` in
+`config.yaml`:
+
+```yaml
+folder_ingest:
+  enabled: true
+  directories:
+    - ~/Transcripts/Inbox
+  poll_interval_minutes: 5    # how often the menu bar app scans the directories
+  max_attempts: 3             # attempts (one per hour) before a failing file is given up on
+```
+
+Run one scan on demand:
+
+```
+$ poetry run python main.py folder_ingest
+```
+
+Or let the menu bar app poll in the background (it scans shortly after startup and then every
+`poll_interval_minutes`; the icon shows the transcribing state while a scan runs). The feature is
+off when `enabled` is false or `directories` is empty.
+
+How it works:
+
+- **What's picked up:** regular files ending in `.txt` or `.md` (case-insensitive) at the **top
+  level** of each configured directory. Subdirectories are never scanned. A directory that's
+  missing or unreadable is skipped with a warning; the other directories are still scanned.
+- **Output:** the file's text is summarized with `summary_prompt`, titled via `title_prompt`, and
+  written as transcript + summary Markdown into `transcript_dir`/`summary_dir`, timestamped with
+  the file's **modification time** (a closer proxy for when the meeting happened than the moment
+  the scan ran).
+- **Filesystem side effects:** the app moves files around inside every configured directory:
+  - `processed/` — a successfully ingested file is **moved** here, so it's never picked up again.
+    Drop a file with the same name again later and it's ingested again, then stored as
+    `name-1.txt`, `name-2.txt`, ….
+  - `failed/` — created only when a file is first given up on; the file is moved here and left
+    alone (same numeric-suffix rule on name clashes). The menu bar app notifies you when this
+    happens.
+- **Failures:** a file that can't be read as UTF-8 text, is empty, or fails anywhere in the
+  pipeline stays where it is and is retried on a **fixed hourly interval**, independent of
+  `poll_interval_minutes` — a 5-minute poll interval still retries a failing file at most once an
+  hour. After `max_attempts` it's moved into `failed/`. Retry state lives in
+  `~/.config/meet-recorder/processed_folder_ingest.json`; successfully ingested files are never
+  written there.
 
 ## Autostart at login (launchd)
 

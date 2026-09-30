@@ -205,6 +205,85 @@ meet_transcripts:
     assert config.meet_transcripts.max_access_retries == 24
 
 
+def test_folder_ingest_absent_is_disabled(tmp_path):
+    config_path = tmp_path / 'config.yaml'
+    config_path.write_text(VALID_CONFIG)
+
+    config = load_config(str(config_path))
+
+    assert config.folder_ingest.enabled is False
+    assert config.folder_ingest.directories == []
+    assert config.folder_ingest.poll_interval_minutes == 5
+    assert config.folder_ingest.max_attempts == 3
+
+
+def test_folder_ingest_section_parsed_and_paths_expanded(tmp_path):
+    config_path = tmp_path / 'config.yaml'
+    config_path.write_text(VALID_CONFIG + '''
+folder_ingest:
+  enabled: true
+  directories:
+    - ~/Inbox
+    - /abs/notes
+  poll_interval_minutes: 10
+  max_attempts: 6
+''')
+
+    config = load_config(str(config_path))
+
+    assert config.folder_ingest.enabled is True
+    assert config.folder_ingest.directories == [os.path.expanduser('~/Inbox'), '/abs/notes']
+    assert config.folder_ingest.poll_interval_minutes == 10
+    assert config.folder_ingest.max_attempts == 6
+
+
+def test_folder_ingest_defaults_when_only_directories_given(tmp_path):
+    config_path = tmp_path / 'config.yaml'
+    config_path.write_text(VALID_CONFIG + '''
+folder_ingest:
+  enabled: true
+  directories:
+    - /abs/notes
+''')
+
+    config = load_config(str(config_path))
+
+    assert config.folder_ingest.enabled is True
+    assert config.folder_ingest.poll_interval_minutes == 5
+    assert config.folder_ingest.max_attempts == 3
+
+
+@pytest.mark.parametrize('directories', ['[]', 'null'])
+def test_folder_ingest_empty_directories_disables(tmp_path, directories):
+    config_path = tmp_path / 'config.yaml'
+    config_path.write_text(VALID_CONFIG + f'''
+folder_ingest:
+  enabled: true
+  directories: {directories}
+''')
+
+    config = load_config(str(config_path))
+
+    assert config.folder_ingest.enabled is False
+    assert config.folder_ingest.directories == []
+
+
+def test_folder_ingest_clamps_bounds(tmp_path):
+    config_path = tmp_path / 'config.yaml'
+    config_path.write_text(VALID_CONFIG + '''
+folder_ingest:
+  enabled: true
+  directories: [/abs/notes]
+  poll_interval_minutes: 0
+  max_attempts: 0
+''')
+
+    config = load_config(str(config_path))
+
+    assert config.folder_ingest.poll_interval_minutes == 1
+    assert config.folder_ingest.max_attempts == 1
+
+
 def test_credential_and_token_paths(monkeypatch, tmp_path):
     monkeypatch.setenv('HOME', str(tmp_path))
     import importlib

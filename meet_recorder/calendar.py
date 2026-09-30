@@ -147,6 +147,11 @@ def _matches_ignore_slug(event, ignored_slugs):
     return any(ignored in title_slug for ignored in ignored_slugs)
 
 
+def _is_all_day(event):
+    start = event.get('start', {})
+    return 'date' in start and 'dateTime' not in start
+
+
 def _parse_boundary(node):
     if not node:
         return None
@@ -200,6 +205,9 @@ def _eligible_events(events, config, exclude_declined=True):
         if _matches_ignore_slug(event, config.ignored_event_slugs):
             logger.debug(f'"{title}": dropped (matches ignored_event_slugs)')
             continue
+        if _is_all_day(event):
+            logger.debug(f'"{title}": dropped (all-day event)')
+            continue
         if _parse_boundary(event.get('start', {})) is None:
             logger.debug(f'"{title}": dropped (no parseable start)')
             continue
@@ -241,6 +249,9 @@ def _find_event(anchor, config):
 
         for event in _eligible_events(events, config):
             start = _parse_boundary(event.get('start', {}))
+            if start < time_min or start > time_max:
+                logger.debug(f'"{event.get("summary", "(sem título)")}": dropped (start outside match window)')
+                continue
             distance = abs((start - anchor).total_seconds())
             candidates.append((distance, account, event))
 

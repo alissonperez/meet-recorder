@@ -234,6 +234,39 @@ The system SHALL, when the `meet_transcripts` feature is enabled and at least on
 - **WHEN** ingestion polls fail repeatedly and reach the failure-notification threshold
 - **THEN** a notification informs the user, mirroring the auto-record poll-failure behavior, without aborting the app
 
+### Requirement: Periodic folder-ingest poller
+The system SHALL, when the `folder_ingest` feature is enabled with at
+least one configured directory, run a background poller in the menu bar
+app that periodically scans and processes folder-sourced transcripts at
+the configured poll interval, reflecting in-progress ingestion in the
+existing transcribing icon state. When the feature is disabled or no
+directory is configured, the poller SHALL NOT run.
+
+#### Scenario: Poller runs when enabled
+- **WHEN** the menu bar app starts with `folder_ingest.enabled` true and at
+  least one directory configured
+- **THEN** a scan executes shortly after startup and then repeats at the
+  configured poll interval, each run scanning and processing files in a
+  background daemon thread
+
+#### Scenario: Ingestion reflected in the icon
+- **WHEN** a background folder-ingest scan is in progress
+- **THEN** the menu bar icon shows the transcribing state (combinable with
+  the recording state), and returns to its prior state when the run
+  completes, whether it succeeded or failed
+
+#### Scenario: Poller inactive when disabled or unconfigured
+- **WHEN** the menu bar app starts with the `folder_ingest` feature
+  disabled or with no directories configured
+- **THEN** no folder-ingest poller is started and menu bar behavior is
+  otherwise unchanged
+
+#### Scenario: Repeated poll failures surfaced
+- **WHEN** folder-ingest scans fail repeatedly and reach the
+  failure-notification threshold
+- **THEN** a notification informs the user, mirroring the Meet-ingestion
+  poll-failure behavior, without aborting the app
+
 ### Requirement: Deferred retry for failed menu bar transcriptions
 The system SHALL, when a transcription started by the menu bar app fails after its immediate per-request retries are exhausted or bypassed as non-retryable, record that recording's `.wav` path in a persistent deferred-retry ledger rather than treating the failure as terminal, and SHALL later retry the full transcription pipeline (preprocessing through output-file writing) for that file on a fixed one-hour retry interval. Deferral SHALL apply identically to transcriptions started from the normal stop-recording flow and from the crash-recovery process action. A deferred entry SHALL remain identified by the recording's path as it was when the entry was created; because a successful run may rename the recording as its final step, the system SHALL clear a succeeding retry's entry under that original path, so a rename can never strand an entry that would otherwise be retried until its budget ran out.
 
@@ -298,3 +331,22 @@ The system SHALL bound deferred transcription retries by a configurable maximum 
 #### Scenario: Source recording survives abandonment
 - **WHEN** a deferred transcription is abandoned after exhausting its attempt budget
 - **THEN** the source `.wav` file is still present and unmodified at its original path and can be reprocessed manually via the `transcribe` CLI command
+
+### Requirement: System-audio capture interruption notification
+The system SHALL show a native macOS notification when system-audio capture is interrupted during a recording started from the menu bar, indicating that system audio has stopped and that recovery is being attempted, and SHALL show a further notification when system-audio capture is restored, so the user learns mid-meeting both that the problem occurred and that it cleared. The recording SHALL continue uninterrupted in both cases, and neither notification SHALL replace or suppress the sustained-silence notification that applies when capture is not restored.
+
+#### Scenario: Interruption triggers a notification
+- **WHEN** a recording started from the menu bar is in progress and its system-audio capture stops unexpectedly
+- **THEN** a native macOS notification is shown stating that system audio was interrupted and that reconnection is being attempted, and the recording continues
+
+#### Scenario: Restoration triggers a notification
+- **WHEN** system-audio capture is successfully restarted after an interruption during a recording started from the menu bar
+- **THEN** a native macOS notification is shown stating that system audio was restored
+
+#### Scenario: An unrecovered interruption still reaches the sustained-silence notification
+- **WHEN** system-audio capture is interrupted and every restart attempt fails, leaving the system-audio channel silent for the sustained period defined by the capture module
+- **THEN** the existing system-audio sustained-silence notification is shown in addition to the interruption notification
+
+#### Scenario: Notifications are shown without blocking capture
+- **WHEN** the capture module reports an interruption or a restoration from its own background thread
+- **THEN** the notification is delivered on the main thread and the reporting thread is not blocked waiting for it

@@ -45,6 +45,18 @@ base_url: https://openrouter.ai/api/v1
 # this count is also the retry window in hours. Optional; default 72 (~3 days).
 # transcription_max_retries: 72
 
+# Enable speaker diarization, tagging each transcript line with "Speaker N: ...".
+# Only takes effect when transcription_model is one meet-recorder knows how to request
+# diarization for (see DIARIZATION_PAYLOAD_BUILDERS in meet_recorder/transcriber.py;
+# currently just microsoft/mai-transcribe-2, via its Azure backend on OpenRouter) - for
+# any other model this is a no-op and a warning is logged instead, since sending an
+# unsupported model a diarization request tends to fail the whole transcription with a
+# 400. Optional; default false.
+# If you enable this, update your summary_prompt: the default one below tells the
+# summary model not to attribute speech to people, which no longer holds once the
+# transcript carries speaker labels.
+# transcription_diarization: false
+
 # --- Google Calendar integration (OPTIONAL) ---------------------------------
 # Entirely optional. If the `calendars:` list below is omitted, the calendar
 # feature is disabled and the app behaves exactly as without it: transcription
@@ -118,3 +130,28 @@ base_url: https://openrouter.ai/api/v1
 #   Gere um resumo em Markdown com as seções: "Resumo executivo",
 #   "Principais tópicos discutidos" e "Decisões tomadas".
 #   Você pode atribuir falas e decisões às pessoas quando a transcrição as identificar.
+
+# --- Folder transcript ingestion (OPTIONAL) ---------------------------------
+# Periodically scans local directories for `.txt`/`.md` files (exported transcripts,
+# hand-written notes, ...) and runs each through the same summary/title/output pipeline
+# (summary_prompt + title_prompt; output timestamped with the file's modification time).
+# Only each directory's top level is scanned, never its subdirectories.
+#
+# FILESYSTEM SIDE EFFECTS inside every configured directory:
+#   - processed/  successfully ingested files are MOVED here, so they are never picked
+#                 up again (a name clash gets a numeric suffix, e.g. notes-1.txt).
+#   - failed/     files that still fail after max_attempts are MOVED here and left alone.
+# A failing file stays in place and is retried on a FIXED HOURLY interval, regardless of
+# poll_interval_minutes (retry state: ~/.config/meet-recorder/processed_folder_ingest.json).
+#
+# Run once on demand:
+#   poetry run python main.py folder_ingest
+# Or enable the menu bar poller below (requires the app to be running).
+# An empty `directories` list disables the feature.
+#
+# folder_ingest:
+#   enabled: false
+#   directories:
+#     - ~/Transcripts/Inbox
+#   poll_interval_minutes: 5
+#   max_attempts: 3           # attempts (one per hour) before a file is moved to failed/

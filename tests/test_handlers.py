@@ -135,3 +135,26 @@ def test_ignore_choice_leaves_orphans_untouched(monkeypatch):
     merge_mock.assert_not_called()
     delete_mock.assert_not_called()
     transcribe_mock.assert_not_awaited()
+
+
+def test_handler_folder_ingest_logs_written_files(monkeypatch):
+    config = Mock()
+    monkeypatch.setattr(handlers, 'load_config', Mock(return_value=config))
+    ingest_mock = Mock(return_value=[{'transcript_path': 't.md', 'summary_path': 's.md'}])
+    monkeypatch.setattr(handlers.folder_ingest, 'ingest_once', ingest_mock)
+
+    handlers.handler_folder_ingest()
+
+    ingest_mock.assert_called_once_with(config)
+    logged = ' '.join(str(c) for c in handlers.logger.info.call_args_list)
+    assert 't.md' in logged
+    assert 's.md' in logged
+
+
+def test_handler_folder_ingest_reports_nothing_to_ingest(monkeypatch):
+    monkeypatch.setattr(handlers, 'load_config', Mock(return_value=Mock()))
+    monkeypatch.setattr(handlers.folder_ingest, 'ingest_once', Mock(return_value=[]))
+
+    handlers.handler_folder_ingest()
+
+    handlers.logger.info.assert_called_with('Nothing to ingest')
