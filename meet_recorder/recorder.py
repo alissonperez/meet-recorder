@@ -53,6 +53,15 @@ PADDING_CHECK_INTERVAL_SECONDS = 0.5
 # to catch up on its own.
 PADDING_TOLERANCE_SECONDS = 1.0
 
+# Bounds the system-audio restart supervisor: up to 5 attempts spaced 1s, 2s, 4s, 8s, 16s
+# (~31s to exhaust) after an unexpected ScreenCaptureKit stream stop.
+SYS_RESTART_MAX_ATTEMPTS = 5
+SYS_RESTART_BASE_DELAY_SECONDS = 1.0
+# How long a restarted stream must deliver audio continuously before the attempt budget for
+# the next, unrelated interruption is restored to full.
+SYS_RESTART_HEALTHY_RESET_SECONDS = 60.0
+SYS_RESTART_CHECK_INTERVAL_SECONDS = 0.5
+
 
 def _default_on_silence_warning(channel):
     pass
@@ -67,6 +76,21 @@ def _default_on_silence_recovered(channel):
 # the CLI-only path is unchanged; set by menubar.py when running under it.
 on_silence_warning = _default_on_silence_warning
 on_silence_recovered = _default_on_silence_recovered
+
+
+def _default_on_sys_capture_interrupted(error):
+    pass
+
+
+def _default_on_sys_capture_restored():
+    pass
+
+
+# Optional hooks invoked by the system-audio restart supervisor when the ScreenCaptureKit
+# stream stops unexpectedly and again when a restart succeeds. Default to no-ops so the
+# CLI-only path is unchanged; set by menubar.py when running under it.
+on_sys_capture_interrupted = _default_on_sys_capture_interrupted
+on_sys_capture_restored = _default_on_sys_capture_restored
 
 
 class MicResumeFallbackError(RuntimeError):
@@ -111,6 +135,11 @@ _state = {
     'mic_paused': False,
     'last_mic_device': None,
     'recording_active': False,
+    'sys_on_chunk': None,
+    'sys_restart': None,
+    'sys_restart_lock': None,
+    'restart_stop_event': None,
+    'restart_thread': None,
 }
 
 
@@ -368,6 +397,97 @@ def _stop_padding_thread():
     _state['padding_thread'] = None
 
 
+def _sys_restart_tick(now):
+    '''The whole system-audio restart policy, expressed as pure comparisons against a
+    monotonic `now` so tests can drive it with synthetic clock values instead of waiting real
+    time. Called every SYS_RESTART_CHECK_INTERVAL_SECONDS by _sys_restart_loop.'''
+    restart = _state['sys_restart']
+    handle = _state['sys_handle']
+    # Captured now, not read again after sck_capture.start() blocks below: a teardown racing
+    # this tick clears _state['sys_restart_lock'] to None once it has finished with it, and
+    # this call may still be in flight (past _stop_restart_supervisor's bounded join) when
+    # that happens. Holding our own reference keeps the publish guard below working regardless.
+    restart_lock = _state['sys_restart_lock']
+
+    if handle is not None and handle.stopped_unexpectedly and restart['pending_error'] is None:
+        error = handle.stopped_unexpectedly
+        restart['pending_error'] = error
+        restart['interruptions'].append({'error': error, 'recovered': False})
+        restart['next_delay_seconds'] = SYS_RESTART_BASE_DELAY_SECONDS
+        restart['next_attempt_at'] = now + restart['next_delay_seconds']
+        on_sys_capture_interrupted(error)
+
+    if (
+        restart['pending_error'] is not None
+        and restart['next_attempt_at'] is not None
+        and now >= restart['next_attempt_at']
+    ):
+        if restart['attempts_left'] <= 0:
+            restart['next_attempt_at'] = None
+        else:
+            restart['attempts_left'] -= 1
+            try:
+                new_handle = sck_capture.start(
+                    _state['sys_on_chunk'], sample_rate=SAMPLE_RATE, channels=SYS_AUDIO_CHANNELS,
+                )
+            except Exception as e:
+                logger.error(f'System-audio restart attempt failed: {e}')
+                if restart['attempts_left'] <= 0:
+                    restart['next_attempt_at'] = None
+                else:
+                    restart['next_delay_seconds'] *= 2
+                    restart['next_attempt_at'] = now + restart['next_delay_seconds']
+            else:
+                published = False
+                with restart_lock:
+                    if _state['recording_active']:
+                        _state['sys_handle'] = new_handle
+                        published = True
+                if published:
+                    restart['interruptions'][-1]['recovered'] = True
+                    restart['pending_error'] = None
+                    restart['next_attempt_at'] = None
+                    restart['restarted_at'] = now
+                    on_sys_capture_restored()
+                else:
+                    sck_capture.stop(new_handle)
+
+    if restart['restarted_at'] is not None and (now - restart['restarted_at']) >= SYS_RESTART_HEALTHY_RESET_SECONDS:
+        last_chunk_at = _state['last_chunk_at']['sys']
+        if last_chunk_at is not None and (now - last_chunk_at) < STALE_CHUNK_TIMEOUT_SECONDS:
+            restart['attempts_left'] = SYS_RESTART_MAX_ATTEMPTS
+            restart['restarted_at'] = None
+
+
+def _sys_restart_loop(stop_event):
+    while not stop_event.wait(SYS_RESTART_CHECK_INTERVAL_SECONDS):
+        _sys_restart_tick(time.monotonic())
+
+
+def _start_restart_supervisor():
+    stop_event = threading.Event()
+    thread = threading.Thread(target=_sys_restart_loop, args=(stop_event,), daemon=True)
+
+    _state['restart_stop_event'] = stop_event
+    _state['restart_thread'] = thread
+
+    thread.start()
+
+
+def _stop_restart_supervisor():
+    stop_event = _state['restart_stop_event']
+    thread = _state['restart_thread']
+
+    if stop_event is not None:
+        stop_event.set()
+
+    if thread is not None:
+        thread.join(timeout=2)
+
+    _state['restart_stop_event'] = None
+    _state['restart_thread'] = None
+
+
 def start_recording():
     if _state['recording_active']:
         raise RuntimeError('A recording is already in progress')
@@ -389,6 +509,15 @@ def start_recording():
     _state['last_chunk_at'] = {'mic': None, 'sys': None}
     _state['frame_counts'] = {'mic': 0, 'sys': 0}
     _state['frame_counts_lock'] = threading.Lock()
+    _state['sys_restart_lock'] = threading.Lock()
+    _state['sys_restart'] = {
+        'interruptions': [],
+        'attempts_left': SYS_RESTART_MAX_ATTEMPTS,
+        'next_attempt_at': None,
+        'next_delay_seconds': None,
+        'pending_error': None,
+        'restarted_at': None,
+    }
 
     def mic_callback(indata, frames, time_info, status):
         if status:
@@ -403,6 +532,7 @@ def start_recording():
         _append_to_silence_buffer('sys', chunk)
 
     _state['mic_callback'] = mic_callback
+    _state['sys_on_chunk'] = sys_on_chunk
 
     mic_writer_thread = _start_writer(mic_queue, mic_temp_path)
     sys_writer_thread = _start_writer(sys_queue, sys_temp_path)
@@ -437,6 +567,9 @@ def start_recording():
         _state['frame_counts'] = None
         _state['frame_counts_lock'] = None
         _state['mic_callback'] = None
+        _state['sys_on_chunk'] = None
+        _state['sys_restart_lock'] = None
+        _state['sys_restart'] = None
         raise
 
     _state['mic_stream'] = mic_stream
@@ -455,6 +588,7 @@ def start_recording():
     _start_silence_monitor()
     _start_early_buffer_check()
     _start_padding_thread()
+    _start_restart_supervisor()
 
 
 def pause_mic():
@@ -592,8 +726,20 @@ def _teardown_capture():
                 _state['mic_stream'].close()
             except Exception as e:
                 logger.error(f'Error closing mic stream: {e}')
-        sys_handle = _state['sys_handle']
-        stopped_unexpectedly = sys_handle.stopped_unexpectedly if sys_handle is not None else None
+        # Stop the supervisor before sck_capture.stop() so it can't publish a fresh handle
+        # (from a restart racing this teardown) after sys_handle has been snapshotted below.
+        _stop_restart_supervisor()
+
+        with _state['sys_restart_lock']:
+            sys_handle = _state['sys_handle']
+            _state['sys_handle'] = None
+
+        restart = _state['sys_restart']
+        if sys_handle is not None and sys_handle.stopped_unexpectedly and restart['pending_error'] is None:
+            # The supervisor never ticked on this stop (it raced teardown), so record it here
+            # instead of silently losing the last interruption.
+            restart['interruptions'].append({'error': sys_handle.stopped_unexpectedly, 'recovered': False})
+
         sck_capture.stop(sys_handle)
 
         # Stop the padder (which performs a final zero-tolerance levelling pass) before the
@@ -603,7 +749,7 @@ def _teardown_capture():
         _stop_writer(_state['mic_queue'], _state['mic_writer_thread'])
         _stop_writer(_state['sys_queue'], _state['sys_writer_thread'])
 
-        return _state['mic_temp_path'], _state['sys_temp_path'], _state['temp_dir'], stopped_unexpectedly
+        return _state['mic_temp_path'], _state['sys_temp_path'], _state['temp_dir'], restart['interruptions']
     finally:
         _state['mic_stream'] = None
         _state['sys_handle'] = None
@@ -626,19 +772,38 @@ def _teardown_capture():
         _state['mic_paused'] = False
         _state['last_mic_device'] = None
         _state['recording_active'] = False
+        _state['sys_on_chunk'] = None
+        _state['sys_restart'] = None
+        _state['sys_restart_lock'] = None
+
+
+def _build_interruption_warning(path, interruptions):
+    count = len(interruptions)
+    plural = 's' if count != 1 else ''
+    if interruptions[-1]['recovered']:
+        outcome = (
+            'system audio is missing (padded with silence) only for the duration of the '
+            'interruption(s), and capture resumed afterward'
+        )
+    else:
+        outcome = (
+            'system audio capture could not be restarted and is missing from that point to the '
+            'end of the recording, though microphone audio was preserved for the whole recording'
+        )
+    return (
+        f'Recording saved to {path} but system-audio capture stopped unexpectedly '
+        f'{count} time{plural} during recording; {outcome}.'
+    )
 
 
 def stop_recording_and_save():
     if not _state['recording_active']:
         raise RuntimeError('No recording is in progress')
 
-    mic_temp_path, sys_temp_path, temp_dir, stopped_unexpectedly = _teardown_capture()
+    mic_temp_path, sys_temp_path, temp_dir, interruptions = _teardown_capture()
     path = merge_and_cleanup(mic_temp_path, sys_temp_path, temp_dir)
-    if stopped_unexpectedly:
-        logger.warning(
-            f'Recording saved to {path} but system-audio capture stopped unexpectedly '
-            f'partway through ({stopped_unexpectedly}); the file may be truncated.'
-        )
+    if interruptions:
+        logger.warning(_build_interruption_warning(path, interruptions))
     return path
 
 
@@ -646,7 +811,7 @@ def discard_recording():
     if not _state['recording_active']:
         raise RuntimeError('No recording is in progress')
 
-    _mic_temp_path, _sys_temp_path, temp_dir, _stopped_unexpectedly = _teardown_capture()
+    _mic_temp_path, _sys_temp_path, temp_dir, _interruptions = _teardown_capture()
     shutil.rmtree(temp_dir, ignore_errors=True)
 
 
