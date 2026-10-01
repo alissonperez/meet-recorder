@@ -7,7 +7,7 @@ readme = "README.md"
 license = "AGPL-3.0-or-later"
 
 [tool.poetry.dependencies]
-python = "^3.13"
+python = "^3.14"
 fire = "^0.7.0"
 python-dotenv = "^1.0.1"
 sounddevice = "^0.5.5"

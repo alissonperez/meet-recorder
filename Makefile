@@ -8,5 +8,7 @@ lint:
 test:
 	poetry run pytest
 
+check: lint test
+
 # Setup app to run locally
 setup: install
